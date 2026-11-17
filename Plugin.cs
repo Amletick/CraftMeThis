@@ -4,6 +4,7 @@ using System.IO;
 using System.Linq;
 using System.Text.Json;
 using Dalamud.Configuration;
+using Dalamud.Game;
 using Dalamud.Game.ClientState.Conditions;
 using Dalamud.Game.Command;
 using Dalamud.Interface.Windowing;
@@ -28,6 +29,15 @@ public sealed class Configuration : IPluginConfiguration
     public int IdleSeconds { get; set; } = 6;
     /// <summary>Minutes to wait for the soft stop before forcing "/afg stop".</summary>
     public int SoftStopTimeoutMinutes { get; set; } = 8;
+    /// <summary>The plugin's own cart (imported from Teamcraft or edited here), sent to LazyCrafter on demand.</summary>
+    public List<CartEntry> Cart { get; set; } = new();
+}
+
+[Serializable]
+public sealed class CartEntry
+{
+    public uint RecipeId { get; set; }
+    public int Crafts { get; set; }
 }
 
 public enum Phase { Idle, Farming, Stopping, Done, Failed }
@@ -67,7 +77,8 @@ public sealed class Plugin : IDalamudPlugin
     public Plugin()
     {
         Config = Pi.GetPluginConfig() as Configuration ?? new Configuration();
-        Planner = new Planner(Data.GetExcelSheet<Recipe>(), Data.GetExcelSheet<SpecialShop>(), Data.GetExcelSheet<Item>());
+        Planner = new Planner(Data.GetExcelSheet<Recipe>(), Data.GetExcelSheet<SpecialShop>(), Data.GetExcelSheet<Item>(),
+            new[] { Data.GetExcelSheet<Item>(ClientLanguage.English) });
 
         window = new MainWindow(this);
         windows.AddWindow(window);
@@ -176,6 +187,42 @@ public sealed class Plugin : IDalamudPlugin
         {
             // AFG not installed or the file is busy: not fatal, the loaded check reports a missing plugin.
         }
+    }
+
+    // ---------------------------------------------------------------- own cart
+
+    internal string Import(string text, bool replace)
+    {
+        var res = Teamcraft.Parse(text, Planner);
+        if (res.Error != null) return res.Error;
+        if (replace) Config.Cart.Clear();
+        foreach (var l in res.Lines) AddToCart(l.RecipeId, l.Crafts, save: false);
+        SaveConfig();
+        var msg = $"Импортировано рецептов: {res.Lines.Count}.";
+        if (res.Skipped.Count > 0) msg += " Пропущено: " + string.Join("; ", res.Skipped.Take(8)) + (res.Skipped.Count > 8 ? " …" : "");
+        return msg;
+    }
+
+    internal void AddToCart(uint recipeId, int crafts, bool save = true)
+    {
+        if (crafts <= 0 || !Planner.IsRecipe(recipeId)) return;
+        var e = Config.Cart.FirstOrDefault(x => x.RecipeId == recipeId);
+        if (e != null) e.Crafts += crafts;
+        else Config.Cart.Add(new CartEntry { RecipeId = recipeId, Crafts = crafts });
+        if (save) SaveConfig();
+    }
+
+    /// <summary>Plan for the plugin's own cart, without touching LazyCrafter.</summary>
+    internal GemPlan OwnCartPlan() => Planner.Build(Config.Cart.Select(c => new CartLine(c.RecipeId, c.Crafts)), BagCount);
+
+    internal string SendToLazyCrafter(bool replace)
+    {
+        if (Config.Cart.Count == 0) return "Корзина пуста.";
+        if (Phase is Phase.Farming or Phase.Stopping) return "Сначала останови фарм.";
+        var err = LazyCrafterLink.SetCart(Config.Cart.Select(c => new CartLine(c.RecipeId, c.Crafts)).ToList(), replace);
+        if (err != null) return err;
+        Recalculate();
+        return replace ? "Корзина LazyCrafter заменена." : "Добавлено в корзину LazyCrafter.";
     }
 
     // ---------------------------------------------------------------- run

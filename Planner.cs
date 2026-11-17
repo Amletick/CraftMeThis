@@ -75,6 +75,47 @@ public sealed class Planner
 
     public int GemOfferCount => gemOffers.Count;
 
+    private readonly IEnumerable<ExcelSheet<Item>> nameSheets = Array.Empty<ExcelSheet<Item>>();
+    private Dictionary<string, uint>? itemByName;
+
+    /// <param name="nameSheets">Item sheets in the languages item names may be typed in (client language, English...).</param>
+    public Planner(ExcelSheet<Recipe> recipes, ExcelSheet<SpecialShop> shops, ExcelSheet<Item> items, IEnumerable<ExcelSheet<Item>> nameSheets)
+        : this(recipes, shops, items)
+    {
+        this.nameSheets = nameSheets;
+    }
+
+    /// <summary>Recipe row and yield to make an item. A recipe id from an export wins when it really makes that item.</summary>
+    public (uint RecipeId, int Yield)? ResolveRecipe(uint itemId, uint? recipeId)
+    {
+        if (recipeId is { } rid && recipes.TryGetRow(rid, out var given) && given.ItemResult.RowId == itemId && given.AmountResult > 0)
+            return (rid, given.AmountResult);
+        return recipeByItem.TryGetValue(itemId, out var r) ? (r.RowId, r.AmountResult) : null;
+    }
+
+    public bool IsRecipe(uint recipeId) => recipes.TryGetRow(recipeId, out var r) && r.ItemResult.RowId != 0;
+
+    /// <summary>Item id by exact (case-insensitive) name; craftable items win over others with the same name.</summary>
+    public uint FindItem(string name)
+    {
+        if (itemByName == null)
+        {
+            var map = new Dictionary<string, uint>(StringComparer.OrdinalIgnoreCase);
+            foreach (var sheet in nameSheets.Prepend(items))
+            {
+                foreach (var it in sheet)
+                {
+                    var n = it.Name.ExtractText().Trim();
+                    if (n.Length == 0) continue;
+                    if (!map.TryGetValue(n, out var existing) || (!recipeByItem.ContainsKey(existing) && recipeByItem.ContainsKey(it.RowId)))
+                        map[n] = it.RowId;
+                }
+            }
+            itemByName = map;
+        }
+        return itemByName.TryGetValue(name.Trim(), out var id) ? id : 0;
+    }
+
     public string ItemName(uint id) => items.TryGetRow(id, out var it) ? it.Name.ExtractText() : $"#{id}";
 
     public string RecipeName(uint recipeId) =>

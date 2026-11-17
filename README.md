@@ -10,6 +10,17 @@ Otherwise it puts them on the market-board list. Bicolor Bridge fills that gap:
 3. If you are short: `/afg start`, then `/afg stop soft` as soon as the count is reached.
 4. Waits until the character is idle, then runs `/lcraft dispatch`. LazyCrafter now buys from the Gemstone Trader.
 
+## Cart and Teamcraft import
+
+The **Cart** tab holds the plugin's own cart. Fill it from Teamcraft by pasting one of these:
+- an import link (`https://ffxivteamcraft.com/import/...`, also exported by LazyCrafter);
+- a "Copy as text" list (only the *Final items* section is used);
+- plain lines like `5x Boiled Alpaca Steak`.
+
+Teamcraft amounts are items, so they are turned into crafts using the recipe yield.
+**Send to LazyCrafter** replaces (or adds to) LazyCrafter's cart. LazyCrafter has no cart IPC, so this calls
+its own `CatalogService.ClearCart/AddToCart` through reflection and may break when LazyCrafter changes.
+
 ## Usage
 
 - `/bbridge`: opens the window (plan, gemstone count, settings)
