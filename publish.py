@@ -14,7 +14,7 @@ import re
 import shutil
 import subprocess
 import sys
-import urllib.request
+
 
 OWNER, REPO = "Amletick", "CraftMeThis"
 ROOT = os.path.dirname(os.path.abspath(__file__))
@@ -40,17 +40,21 @@ def token():
 
 
 def api(method, url, tok, body=None, data=None, ctype="application/json"):
+    """GitHub API call through curl (Python's own TLS store fails behind the VPN; curl uses the Windows one)."""
     payload = data if data is not None else (json.dumps(body).encode() if body is not None else None)
-    req = urllib.request.Request(url, data=payload, method=method, headers={
-        "Authorization": f"Bearer {tok}", "Accept": "application/vnd.github+json", "Content-Type": ctype})
-    try:
-        with urllib.request.urlopen(req) as r:
-            raw = r.read()
-            return json.loads(raw) if raw else {}
-    except urllib.error.HTTPError as e:
-        if e.code == 404:
-            return None
-        sys.exit(f"GitHub {method} {url}: {e.code} {e.read().decode(errors='replace')}")
+    cmd = ["curl", "-s", "-S", "-X", method, "-w", "\n%{http_code}",
+           "-H", f"Authorization: Bearer {tok}", "-H", "Accept: application/vnd.github+json", "-H", f"Content-Type: {ctype}"]
+    if payload is not None:
+        cmd += ["--data-binary", "@-"]
+    r = subprocess.run(cmd + [url], input=payload, capture_output=True)
+    out = r.stdout.decode("utf-8", errors="replace")
+    body_text, _, code = out.rpartition("\n")
+    code = int(code or 0)
+    if code == 404:
+        return None
+    if code >= 300 or r.returncode != 0:
+        sys.exit(f"GitHub {method} {url}: {code} {body_text} {r.stderr.decode(errors='replace')}")
+    return json.loads(body_text) if body_text.strip() else {}
 
 
 def main():
