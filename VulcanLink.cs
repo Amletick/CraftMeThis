@@ -149,36 +149,88 @@ public sealed class VulcanLink
 
     // ---------------------------------------------------------------- crafting
 
-    /// <summary>Creates an ephemeral "CraftMeThis" crafting list with the cart and starts Vulcan's gather + craft queue.</summary>
-    public string? StartCrafting(IReadOnlyList<CartLine> cart, bool retainerRestock)
+    /// <summary>
+    /// Makes Vulcan's persistent crafting list "CraftMeThis" equal to the cart (created if missing), so Vulcan's own
+    /// Materials window shows the cart. Returns the list object, or null with an error.
+    /// </summary>
+    public object? SyncList(IReadOnlyList<CartLine> cart, bool retainerRestock, out string? error)
     {
-        if (!Ready(out var err)) return err;
+        if (!Ready(out error)) return null;
         try
         {
             var mgr = Static("CraftingListManager") ?? throw new InvalidOperationException("CraftingListManager ещё не создан");
             var mt = mgr.GetType();
-            if (mt.GetMethod("GetListByName", Any)?.Invoke(mgr, new object[] { ListName }) is { } old
-                && old.GetType().GetProperty("ID", Any)?.GetValue(old) is int oldId)
+            var list = mt.GetMethod("GetListByName", Any)?.Invoke(mgr, new object[] { ListName });
+            // 0.8.0 made it ephemeral (Vulcan deletes those after a run): replace it with a normal list.
+            if (list != null && list.GetType().GetProperty("Ephemeral", Any)?.GetValue(list) is true
+                && list.GetType().GetProperty("ID", Any)?.GetValue(list) is int oldId)
+            {
                 mt.GetMethod("DeleteList", Any, new[] { typeof(int) })?.Invoke(mgr, new object[] { oldId });
+                list = null;
+            }
+            list ??= mt.GetMethod("CreateNewList", Any)!.Invoke(mgr, new object?[] { ListName, false, null })!;
 
-            var list = mt.GetMethod("CreateNewList", Any)!.Invoke(mgr, new object?[] { ListName, true, null })!;
             var lt = list.GetType();
+            if (lt.GetProperty("Recipes", Any)?.GetValue(list) is IList recipes) recipes.Clear();
             var add = lt.GetMethod("AddRecipe", Any, new[] { typeof(uint), typeof(int) })!;
             foreach (var l in cart) if (l.Crafts > 0) add.Invoke(list, new object[] { l.RecipeId, l.Crafts });
             lt.GetProperty("RetainerRestock", Any)?.SetValue(list, retainerRestock);
+            lt.GetMethod("BuildExpandedList", Any, Type.EmptyTypes)?.Invoke(list, null);
             mt.GetMethod("SaveList", Any)?.Invoke(mgr, new[] { list });
+            return list;
+        }
+        catch (Exception ex)
+        {
+            error = $"Не удалось обновить список «{ListName}» в Vulcan: {Inner(ex)}";
+            return null;
+        }
+    }
 
+    /// <summary>Syncs the "CraftMeThis" list and starts Vulcan's gather + craft queue on it.</summary>
+    public string? StartCrafting(IReadOnlyList<CartLine> cart, bool retainerRestock)
+    {
+        var list = SyncList(cart, retainerRestock, out var err);
+        if (list == null) return err;
+        try
+        {
+            var lt = list.GetType();
             var plan = T("GatherBuddy.Crafting.CraftingExecutionPlan").GetMethod("Create", Any, new[] { lt })!.Invoke(null, new[] { list });
-            var bridge = T("GatherBuddy.Crafting.CraftingGatherBridge");
-            var startQ = bridge.GetMethod("StartQueueCraftAndGather", Any)!;
+            var startQ = T("GatherBuddy.Crafting.CraftingGatherBridge").GetMethod("StartQueueCraftAndGather", Any)!;
             var consumables = lt.GetProperty("Consumables", Any)?.GetValue(list);
-            var id = (int)lt.GetProperty("ID", Any)!.GetValue(list)!;
-            startQ.Invoke(null, new[] { plan, consumables, (object?)id });
+            startQ.Invoke(null, new[] { plan, consumables, null });
             return null;
         }
         catch (Exception ex)
         {
             return $"Не удалось запустить крафт в Vulcan: {Inner(ex)}";
+        }
+    }
+
+    /// <summary>
+    /// After "/vulcan CraftMeThis" has opened the list in the Vulcan window: hand its editor to Vulcan's Materials
+    /// window and show it, like the editor's own "Materials" button. Returns false while the editor is not there yet.
+    /// </summary>
+    public bool ShowMaterialsWindow()
+    {
+        if (!Ready(out _)) return false;
+        try
+        {
+            var plugin = PluginFinder.FindPluginInstance("GatherBuddyReborn");
+            var vulcan = plugin?.GetType().GetField("_vulcanWindow", Any)?.GetValue(plugin);
+            var editor = vulcan?.GetType().GetField("_listEditor", Any)?.GetValue(vulcan);
+            if (editor == null) return false;
+            var mats = Static("CraftingMaterialsWindow");
+            if (mats == null) return false;
+            mats.GetType().GetMethod("SetEditor", Any)?.Invoke(mats, new[] { editor });
+            var restore = mats.GetType().GetMethod("OpenAndRestore", Any, Type.EmptyTypes);
+            if (restore != null) restore.Invoke(mats, null);
+            else mats.GetType().GetProperty("IsOpen", Any)?.SetValue(mats, true);
+            return true;
+        }
+        catch (Exception ex)
+        {
+            Plugin.Log.Warning($"Vulcan materials window: {Inner(ex)}");
+            return true; // give up quietly; the list itself is open in Vulcan
         }
     }
 

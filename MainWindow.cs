@@ -337,6 +337,8 @@ public sealed class MainWindow : Window
             return;
         }
 
+        if (Ui.IconButton(FontAwesomeIcon.Boxes, "Materials в Vulcan", "Открыть корзину в Vulcan (список «CraftMeThis») вместе с его окном Materials")) p.OpenVulcanMaterials();
+        ImGui.SameLine();
         if (Ui.IconButton(FontAwesomeIcon.Trash, "Очистить")) p.ClearCart();
 
         if (ImGui.BeginTable("cart", 3, ImGuiTableFlags.RowBg | ImGuiTableFlags.PadOuterX))
@@ -357,13 +359,13 @@ public sealed class MainWindow : Window
                 ImGui.TableNextColumn();
                 ImGui.SetNextItemWidth(-1);
                 var crafts = e.Crafts;
-                if (ImGui.InputInt("##n", ref crafts) && crafts > 0) { e.Crafts = crafts; p.SaveConfig(); p.Recalculate(); }
+                if (ImGui.InputInt("##n", ref crafts) && crafts > 0) { e.Crafts = crafts; p.CartEdited(); }
                 ImGui.TableNextColumn();
                 if (Ui.IconButton(FontAwesomeIcon.Times, "", "Убрать")) remove = e;
                 ImGui.PopID();
             }
             ImGui.EndTable();
-            if (remove != null) { cart.Remove(remove); p.SaveConfig(); p.Recalculate(); }
+            if (remove != null) { cart.Remove(remove); p.CartEdited(); }
         }
         Ui.EndCard();
     }
@@ -399,6 +401,8 @@ public sealed class MainWindow : Window
             ImGui.TextColored(Ui.Good, "Всё сырьё уже в сумке.");
             return;
         }
+        if (Ui.IconButton(FontAwesomeIcon.Boxes, "Открыть Materials в Vulcan", "Окно материалов Vulcan для этой корзины (список «CraftMeThis»)")) p.OpenVulcanMaterials();
+        ImGui.SameLine();
         if (Ui.IconButton(FontAwesomeIcon.Undo, "Сбросить выбор на авто")) { p.Config.Routes.Clear(); p.SaveConfig(); p.Recalculate(); }
         ImGui.SameLine();
         ImGui.TextColored(Ui.Gem, $"биколоров нужно: {p.Plan.Gems}");

@@ -325,6 +325,7 @@ public sealed class Plugin : IDalamudPlugin
         foreach (var m in res.Manual) if (!Config.ImportManual.Contains(m)) Config.ImportManual.Add(m);
         SaveConfig();
         Recalculate();
+        SyncVulcanList();
         var msg = $"Импортировано рецептов: {res.Lines.Count}.";
         if (res.Skipped.Count > 0) msg += " Заметки: " + string.Join("; ", res.Skipped.Take(8)) + (res.Skipped.Count > 8 ? " …" : "");
         return msg;
@@ -348,6 +349,14 @@ public sealed class Plugin : IDalamudPlugin
         Recalculate();
     }
 
+    /// <summary>After a craft count was edited or a line removed on the Cart tab.</summary>
+    internal void CartEdited()
+    {
+        SaveConfig();
+        Recalculate();
+        SyncVulcanList();
+    }
+
     /// <summary>The imported Teamcraft list, or a Teamcraft import link for the cart; null when there is nothing.</summary>
     internal string? TeamcraftLink() =>
         Config.TeamcraftListUrl.Length > 0 ? Config.TeamcraftListUrl
@@ -358,6 +367,25 @@ public sealed class Plugin : IDalamudPlugin
     {
         if (TeamcraftLink() is { } url) Dalamud.Utility.Util.OpenLink(url);
         else Print("корзина пуста — нечего открывать в Teamcraft.");
+    }
+
+    private DateTime materialsUntil = DateTime.MinValue;
+
+    /// <summary>Syncs the cart into Vulcan's "CraftMeThis" list and opens it with Vulcan's Materials window.</summary>
+    internal void OpenVulcanMaterials()
+    {
+        if (!IsLoaded(GatherBuddy)) { Print("GatherBuddy Reborn не загружен."); return; }
+        if (Config.Cart.Count == 0) { Print("корзина пуста — нечего показывать."); return; }
+        if (Vulcan.SyncList(CartLines(), Config.UseRetainers, out var err) == null) { Print(err!); return; }
+        Run($"/vulcan {VulcanLink.ListName}");
+        materialsUntil = DateTime.UtcNow.AddSeconds(5);
+    }
+
+    /// <summary>Keeps Vulcan's "CraftMeThis" list in step with the cart (quietly; nothing to do without GatherBuddy).</summary>
+    private void SyncVulcanList()
+    {
+        if (Running || Config.Cart.Count == 0 || !IsLoaded(GatherBuddy)) return;
+        if (Vulcan.SyncList(CartLines(), Config.UseRetainers, out var err) == null) Log.Warning(err ?? "Vulcan sync failed");
     }
 
     internal void OpenVulcan()
@@ -528,6 +556,11 @@ public sealed class Plugin : IDalamudPlugin
 
     private void OnUpdate(IFramework _)
     {
+        if (materialsUntil != DateTime.MinValue)
+        {
+            // The Vulcan window builds the list editor a frame after "/vulcan <list>".
+            if (Vulcan.ShowMaterialsWindow() || DateTime.UtcNow > materialsUntil) materialsUntil = DateTime.MinValue;
+        }
         if (!Running) return;
         var now = DateTime.UtcNow;
         if (now < nextTick) return;
