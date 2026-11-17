@@ -15,7 +15,7 @@ using FFXIVClientStructs.FFXIV.Client.Game;
 using FFXIVClientStructs.FFXIV.Client.Game.Fate;
 using Lumina.Excel.Sheets;
 
-namespace BicolorBridge;
+namespace CraftMeThis;
 
 [Serializable]
 public sealed class Configuration : IPluginConfiguration
@@ -31,6 +31,14 @@ public sealed class Configuration : IPluginConfiguration
     public int SoftStopTimeoutMinutes { get; set; } = 8;
     /// <summary>The plugin's own cart (imported from Teamcraft or edited here), sent to LazyCrafter on demand.</summary>
     public List<CartEntry> Cart { get; set; } = new();
+    /// <summary>Farm zone (territory id) chosen by hand; 0 = pick automatically from the cart.</summary>
+    public uint ZoneOverride { get; set; }
+    /// <summary>Set the farm zone in Auto FATE Grind before the run (its own zones are put back afterwards).</summary>
+    public bool SetAfgZone { get; set; } = true;
+    /// <summary>Switch to the first suitable job from <see cref="Jobs"/> before farming.</summary>
+    public bool SwitchJob { get; set; } = true;
+    /// <summary>Job priority, top first.</summary>
+    public List<JobPref> Jobs { get; set; } = new();
 }
 
 [Serializable]
@@ -40,7 +48,7 @@ public sealed class CartEntry
     public int Crafts { get; set; }
 }
 
-public enum Phase { Idle, Farming, Stopping, Done, Failed }
+public enum Phase { Idle, Preparing, Farming, Stopping, Done, Failed }
 
 public sealed class Plugin : IDalamudPlugin
 {
@@ -53,13 +61,17 @@ public sealed class Plugin : IDalamudPlugin
     [PluginService] internal static IClientState ClientState { get; private set; } = null!;
     [PluginService] internal static IPluginLog Log { get; private set; } = null!;
 
-    private const string Cmd = "/bbridge";
+    private const string Cmd = "/craftme";
+    private const string CmdShort = "/cmt";
     private const string LazyCrafter = "LazyCrafter";
     private const string AutoFateGrind = "AutoFateGrind";
 
     internal readonly Configuration Config;
     internal readonly Planner Planner;
-    private readonly WindowSystem windows = new("BicolorBridge");
+    internal readonly Zones Zones;
+    internal readonly Jobs Jobs;
+    private readonly AfgLink afg = new();
+    private readonly WindowSystem windows = new("CraftMeThis");
     private readonly MainWindow window;
 
     internal GemPlan Plan { get; private set; } = GemPlan.Empty;
@@ -68,6 +80,10 @@ public sealed class Plugin : IDalamudPlugin
     internal int Target { get; private set; }
     internal int Gems { get; private set; }
     internal List<string> Warnings { get; } = new();
+    internal ZoneChoice? Zone { get; private set; }
+
+    internal bool Running => Phase is Phase.Preparing or Phase.Farming or Phase.Stopping;
+    private DateTime startAt;
 
     private DateTime nextTick = DateTime.MinValue;
     private DateTime stopSentAt;
@@ -79,6 +95,9 @@ public sealed class Plugin : IDalamudPlugin
         Config = Pi.GetPluginConfig() as Configuration ?? new Configuration();
         Planner = new Planner(Data.GetExcelSheet<Recipe>(), Data.GetExcelSheet<SpecialShop>(), Data.GetExcelSheet<Item>(),
             new[] { Data.GetExcelSheet<Item>(ClientLanguage.English) });
+        Zones = new Zones(Data.GetExcelSheet<FateShop>(), Data.GetExcelSheet<SpecialShop>(), Data.GetExcelSheet<Level>(), Data.GetExcelSheet<ENpcResident>());
+        Jobs = new Jobs(Data.GetExcelSheet<ClassJob>());
+        Jobs.Normalize(Config.Jobs);
 
         window = new MainWindow(this);
         windows.AddWindow(window);
@@ -88,8 +107,9 @@ public sealed class Plugin : IDalamudPlugin
 
         Commands.AddHandler(Cmd, new CommandInfo(OnCommand)
         {
-            HelpMessage = "окно; /bbridge plan — посчитать биколоры по корзине LazyCrafter; /bbridge start — нафармить и запустить корзину; /bbridge stop — остановить",
+            HelpMessage = "окно; /craftme plan — посчитать биколоры по корзине LazyCrafter; /craftme start — нафармить и запустить корзину; /craftme stop — остановить",
         });
+        Commands.AddHandler(CmdShort, new CommandInfo(OnCommand) { HelpMessage = "то же, что /craftme" });
         Framework.Update += OnUpdate;
     }
 
@@ -97,6 +117,8 @@ public sealed class Plugin : IDalamudPlugin
     {
         Framework.Update -= OnUpdate;
         Commands.RemoveHandler(Cmd);
+        Commands.RemoveHandler(CmdShort);
+        afg.Restore();
         Pi.UiBuilder.Draw -= windows.Draw;
         Pi.UiBuilder.OpenMainUi -= OpenWindow;
         Pi.UiBuilder.OpenConfigUi -= OpenWindow;
@@ -118,7 +140,8 @@ public sealed class Plugin : IDalamudPlugin
                 Print(Plan.Purchases.Count == 0
                     ? "в корзине LazyCrafter нет материалов за биколоры."
                     : $"корзине нужно {Plan.Gems} биколоров, у тебя {Gems}: " +
-                      string.Join(", ", Plan.Purchases.Select(p => $"{p.Name} x{p.Units} ({p.Gems})")));
+                      string.Join(", ", Plan.Purchases.Select(p => $"{p.Name} x{p.Units} ({p.Gems})")) +
+                      (Zone != null ? $". Зона фарма: {Zone.Zone.Name}." : ""));
                 break;
             default: window.IsOpen = !window.IsOpen; break;
         }
@@ -140,6 +163,14 @@ public sealed class Plugin : IDalamudPlugin
         if (!IsLoaded(LazyCrafter)) Warnings.Add("LazyCrafter не загружен.");
         if (!IsLoaded(AutoFateGrind)) Warnings.Add("Auto FATE Grind не загружен.");
         CheckAfgConfig();
+
+        Zone = Config.ZoneOverride != 0 && Zones.Get(Config.ZoneOverride) is { } manual
+            ? new ZoneChoice(manual, "выбрана вручную", Array.Empty<(string, int)>())
+            : Zones.Choose(Plan);
+        if (Zone?.Sold.Any(s => s.Rank > 1) == true)
+            Warnings.Add($"Часть материалов у торговца {Zone.Zone.Trader} открывается только с ранга {Zone.Sold.Max(s => s.Rank)} общих FATE в {Zone.Zone.Name}.");
+        if (Config.SwitchJob && Zone != null && Plan.Purchases.Count > 0 && Jobs.Pick(Config.Jobs, Zone.Zone.MinLevel) == null)
+            Warnings.Add($"Нет включённого класса уровня {Zone.Zone.MinLevel}+ с гирсетом — фарм пойдёт текущим классом.");
     }
 
     private List<CartLine> ReadCart(out string? error)
@@ -218,7 +249,7 @@ public sealed class Plugin : IDalamudPlugin
     internal string SendToLazyCrafter(bool replace)
     {
         if (Config.Cart.Count == 0) return "Корзина пуста.";
-        if (Phase is Phase.Farming or Phase.Stopping) return "Сначала останови фарм.";
+        if (Running) return "Сначала останови фарм.";
         var err = LazyCrafterLink.SetCart(Config.Cart.Select(c => new CartLine(c.RecipeId, c.Crafts)).ToList(), replace);
         if (err != null) return err;
         Recalculate();
@@ -229,7 +260,7 @@ public sealed class Plugin : IDalamudPlugin
 
     internal void Start()
     {
-        if (Phase is Phase.Farming or Phase.Stopping)
+        if (Running)
         {
             Print("уже работает.");
             return;
@@ -259,33 +290,70 @@ public sealed class Plugin : IDalamudPlugin
         }
 
         Run("/lcraft stop");
-        if (!Run("/afg start"))
+
+        if (Config.SetAfgZone && Zone != null)
         {
-            SetStatus(Phase.Failed, "Команда /afg start не сработала.");
-            return;
+            var err = afg.Apply(Zone.Zone.Territory);
+            if (err != null) Print($"{err} Фарм пойдёт по зонам, выбранным в Auto FATE Grind.");
         }
+
+        var wait = 0.5;
+        if (Config.SwitchJob && Zone != null)
+        {
+            var pick = Jobs.Pick(Config.Jobs, Zone.Zone.MinLevel);
+            if (pick is { } j && j.Job.Id != Jobs.CurrentJob())
+            {
+                if (Jobs.Equip(j.Gearset))
+                {
+                    Print($"переключаюсь на {j.Job.Abbr} {j.Level} (гирсет {j.Gearset + 1}).");
+                    wait = 3;
+                }
+                else
+                {
+                    Print($"не получилось надеть гирсет {j.Gearset + 1} ({j.Job.Abbr}), фармлю текущим классом.");
+                }
+            }
+        }
+
+        startAt = DateTime.UtcNow.AddSeconds(wait);
         forcedStop = false;
-        SetStatus(Phase.Farming, $"Фармлю FATE: {Gems}/{Target} биколоров.");
+        SetStatus(Phase.Preparing, Zone != null
+            ? $"Готовлюсь: зона {Zone.Zone.Name}, нужно {Target} биколоров (есть {Gems})."
+            : $"Готовлюсь: нужно {Target} биколоров (есть {Gems}).");
     }
 
     internal void Stop()
     {
-        if (Phase is Phase.Farming or Phase.Stopping) Run("/afg stop");
+        if (Running) Run("/afg stop");
+        afg.Restore();
         SetStatus(Phase.Idle, "Остановлено вручную.");
     }
 
     private void OnUpdate(IFramework _)
     {
-        if (Phase is not (Phase.Farming or Phase.Stopping)) return;
+        if (!Running) return;
         var now = DateTime.UtcNow;
         if (now < nextTick) return;
         nextTick = now.AddSeconds(1);
         if (!ClientState.IsLoggedIn) return;
 
+        if (Phase == Phase.Preparing)
+        {
+            if (now < startAt) return;
+            if (!Run("/afg start"))
+            {
+                afg.Restore();
+                SetStatus(Phase.Failed, "Команда /afg start не сработала.");
+                return;
+            }
+            SetStatus(Phase.Farming, $"Фармлю FATE{(Zone != null ? " в " + Zone.Zone.Name : "")}: {Gems}/{Target} биколоров.");
+            return;
+        }
+
         Gems = GemCount();
         if (Phase == Phase.Farming)
         {
-            Status = $"Фармлю FATE: {Gems}/{Target} биколоров.";
+            Status = $"Фармлю FATE{(Zone != null ? " в " + Zone.Zone.Name : "")}: {Gems}/{Target} биколоров.";
             if (Gems < Target) return;
             Run("/afg stop soft");
             stopSentAt = now;
@@ -309,6 +377,7 @@ public sealed class Plugin : IDalamudPlugin
         if (idleSince == DateTime.MinValue) idleSince = now;
         if (now - idleSince < TimeSpan.FromSeconds(Math.Max(2, Config.IdleSeconds))) return;
 
+        afg.Restore();
         if (Config.DispatchAfterFarming)
         {
             SetStatus(Phase.Done, $"Биколоры есть ({Gems}). Запустил корзину LazyCrafter.");
@@ -381,5 +450,5 @@ public sealed class Plugin : IDalamudPlugin
         Print(text);
     }
 
-    private static void Print(string text) => Chat.Print($"[Bicolor Bridge] {text}");
+    private static void Print(string text) => Chat.Print($"[CraftMeThis] {text}");
 }

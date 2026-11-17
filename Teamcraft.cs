@@ -4,7 +4,7 @@ using System.Linq;
 using System.Text;
 using System.Text.RegularExpressions;
 
-namespace BicolorBridge;
+namespace CraftMeThis;
 
 /// <summary>An item and amount read from a Teamcraft export, with the recipe if the export named one.</summary>
 public readonly record struct ImportedItem(uint ItemId, uint? RecipeId, int Quantity);

@@ -4,7 +4,7 @@ using System.Collections.Generic;
 using System.Reflection;
 using Dalamud.Plugin;
 
-namespace BicolorBridge;
+namespace CraftMeThis;
 
 /// <summary>
 /// LazyCrafter has no IPC for its cart, so the cart is changed the same way its own Catalog does it:
@@ -51,7 +51,7 @@ public static class LazyCrafterLink
         }
     }
 
-    private static object? FindPluginInstance(string internalName)
+    internal static object? FindPluginInstance(string internalName)
     {
         var asm = typeof(IDalamudPluginInterface).Assembly;
         var pmType = asm.GetType("Dalamud.Plugin.Internal.PluginManager", true)!;

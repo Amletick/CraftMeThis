@@ -4,7 +4,7 @@ using System.Linq;
 using Lumina.Excel;
 using Lumina.Excel.Sheets;
 
-namespace BicolorBridge;
+namespace CraftMeThis;
 
 /// <summary>One cart line as LazyCrafter stores it: a Recipe row and how many times to craft it.</summary>
 public readonly record struct CartLine(uint RecipeId, int Crafts);

@@ -1,9 +1,0 @@
-{
-  "Author": "Amletick",
-  "Name": "Bicolor Bridge",
-  "Punchline": "Farms the Bicolor Gemstones your LazyCrafter cart needs, then dispatches it.",
-  "Description": "Reads the LazyCrafter cart, works out how many Bicolor Gemstones the materials sold for gemstones cost, runs Auto FATE Grind until you have them, then starts the LazyCrafter cart so it buys from the Gemstone Trader instead of the market board. Requires LazyCrafter and Auto FATE Grind.",
-  "InternalName": "BicolorBridge",
-  "ApplicableVersion": "any",
-  "Tags": ["crafting", "fate", "bicolor", "lazycrafter"]
-}

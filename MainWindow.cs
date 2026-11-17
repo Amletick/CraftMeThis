@@ -3,7 +3,7 @@ using System.Numerics;
 using Dalamud.Bindings.ImGui;
 using Dalamud.Interface.Windowing;
 
-namespace BicolorBridge;
+namespace CraftMeThis;
 
 public sealed class MainWindow : Window
 {
@@ -16,7 +16,7 @@ public sealed class MainWindow : Window
     private bool sendReplace = true;
     private string cartMessage = string.Empty;
 
-    public MainWindow(Plugin plugin) : base("Bicolor Bridge###BicolorBridgeMain")
+    public MainWindow(Plugin plugin) : base("CraftMeThis###CraftMeThisMain")
     {
         p = plugin;
         SizeConstraints = new WindowSizeConstraints { MinimumSize = new Vector2(460, 300), MaximumSize = new Vector2(1600, 1600) };
@@ -32,6 +32,7 @@ public sealed class MainWindow : Window
         {
             if (ImGui.BeginTabItem("Фарм")) { DrawFarm(); ImGui.EndTabItem(); }
             if (ImGui.BeginTabItem("Корзина")) { DrawCart(); ImGui.EndTabItem(); }
+            if (ImGui.BeginTabItem("Классы")) { DrawJobs(); ImGui.EndTabItem(); }
             if (ImGui.BeginTabItem("Настройки")) { DrawSettings(); ImGui.EndTabItem(); }
             ImGui.EndTabBar();
         }
@@ -41,7 +42,7 @@ public sealed class MainWindow : Window
 
     private void DrawFarm()
     {
-        var running = p.Phase is Phase.Farming or Phase.Stopping;
+        var running = p.Running;
         if (running)
         {
             if (ImGui.Button("Остановить")) p.Stop();
@@ -66,6 +67,94 @@ public sealed class MainWindow : Window
         ImGui.Text($"Биколоры: есть {(running ? p.Gems : Plugin.GemCount())}, нужно {p.Plan.Gems}" +
                    (p.Config.Reserve > 0 ? $" + запас {p.Config.Reserve}" : ""));
         DrawGemTable("gems", p.Plan);
+        ImGui.Separator();
+        DrawZone(running);
+    }
+
+    private void DrawZone(bool running)
+    {
+        var c = p.Config;
+        var current = p.Zone;
+        ImGui.Text("Зона фарма:");
+        ImGui.SameLine();
+        ImGui.SetNextItemWidth(220);
+        var preview = c.ZoneOverride == 0 ? $"авто{(current != null ? $" — {current.Zone.Name}" : "")}" : current?.Zone.Name ?? "?";
+        if (!running && ImGui.BeginCombo("##zone", preview))
+        {
+            if (ImGui.Selectable("авто (по материалам корзины)", c.ZoneOverride == 0)) { c.ZoneOverride = 0; p.SaveConfig(); p.Recalculate(); }
+            foreach (var z in p.Zones.All)
+            {
+                var label = $"{z.Name}  (ур. {z.MinLevel}+, {z.Trader})";
+                if (ImGui.Selectable(label, c.ZoneOverride == z.Territory)) { c.ZoneOverride = z.Territory; p.SaveConfig(); p.Recalculate(); }
+            }
+            ImGui.EndCombo();
+        }
+        else if (running)
+        {
+            ImGui.Text(preview);
+        }
+        if (current != null)
+        {
+            ImGui.TextDisabled($"{current.Reason}" +
+                               (current.Sold.Count > 0 ? ": " + string.Join(", ", current.Sold.Select(s => $"{s.Item} (ранг {s.Rank})")) : ""));
+            var pick = c.SwitchJob ? p.Jobs.Pick(c.Jobs, current.Zone.MinLevel) : null;
+            ImGui.TextDisabled(c.SwitchJob
+                ? pick is { } j ? $"Класс: {j.Job.Abbr} {j.Level} (гирсет {j.Gearset + 1})" : "Класс: подходящего нет, останется текущий"
+                : "Класс: текущий (смена выключена)");
+        }
+    }
+
+    // ---------------------------------------------------------------- jobs
+
+    private void DrawJobs()
+    {
+        var c = p.Config;
+        var sw = c.SwitchJob;
+        if (ImGui.Checkbox("Переключать класс перед фармом", ref sw)) { c.SwitchJob = sw; p.SaveConfig(); }
+        ImGui.TextDisabled("Берётся первый включённый класс сверху, у которого есть гирсет и хватает уровня для зоны.");
+        var minLevel = p.Zone?.Zone.MinLevel ?? 0;
+
+        if (!ImGui.BeginTable("jobs", 5, ImGuiTableFlags.RowBg | ImGuiTableFlags.BordersInnerH | ImGuiTableFlags.ScrollY, new Vector2(-1, -1))) return;
+        ImGui.TableSetupScrollFreeze(0, 1);
+        ImGui.TableSetupColumn("", ImGuiTableColumnFlags.WidthFixed, 56);
+        ImGui.TableSetupColumn("Вкл", ImGuiTableColumnFlags.WidthFixed, 34);
+        ImGui.TableSetupColumn("Класс", ImGuiTableColumnFlags.WidthStretch);
+        ImGui.TableSetupColumn("Ур.", ImGuiTableColumnFlags.WidthFixed, 40);
+        ImGui.TableSetupColumn("Гирсет", ImGuiTableColumnFlags.WidthFixed, 60);
+        ImGui.TableHeadersRow();
+
+        int? moveFrom = null, moveTo = null;
+        for (var i = 0; i < c.Jobs.Count; i++)
+        {
+            var pref = c.Jobs[i];
+            var job = p.Jobs.Get(pref.JobId);
+            if (job == null) continue;
+            ImGui.PushID((int)pref.JobId);
+            ImGui.TableNextRow();
+            ImGui.TableNextColumn();
+            if (ImGui.ArrowButton("up", ImGuiDir.Up) && i > 0) { moveFrom = i; moveTo = i - 1; }
+            ImGui.SameLine(0, 2);
+            if (ImGui.ArrowButton("dn", ImGuiDir.Down) && i < c.Jobs.Count - 1) { moveFrom = i; moveTo = i + 1; }
+            ImGui.TableNextColumn();
+            var en = pref.Enabled;
+            if (ImGui.Checkbox("##en", ref en)) { pref.Enabled = en; p.SaveConfig(); }
+            ImGui.TableNextColumn();
+            ImGui.Text($"{i + 1}. {job.Abbr}  {job.Name}");
+            ImGui.TableNextColumn();
+            var lvl = Jobs.Level(job);
+            if (minLevel > 0 && lvl < minLevel) ImGui.TextDisabled(lvl.ToString()); else ImGui.Text(lvl.ToString());
+            ImGui.TableNextColumn();
+            var gs = Jobs.Gearset(job.Id);
+            if (gs >= 0) ImGui.Text((gs + 1).ToString()); else ImGui.TextDisabled("нет");
+            ImGui.PopID();
+        }
+        ImGui.EndTable();
+
+        if (moveFrom is { } f && moveTo is { } t)
+        {
+            (c.Jobs[f], c.Jobs[t]) = (c.Jobs[t], c.Jobs[f]);
+            p.SaveConfig();
+        }
     }
 
     private static void DrawGemTable(string id, GemPlan plan)
@@ -166,8 +255,11 @@ public sealed class MainWindow : Window
         if (ImGui.InputInt("Секунд простоя перед запуском", ref idle)) { c.IdleSeconds = System.Math.Clamp(idle, 2, 60); p.SaveConfig(); }
         var timeout = c.SoftStopTimeoutMinutes;
         if (ImGui.InputInt("Ждать мягкую остановку, мин", ref timeout)) { c.SoftStopTimeoutMinutes = System.Math.Clamp(timeout, 1, 30); p.SaveConfig(); }
+        var setZone = c.SetAfgZone;
+        if (ImGui.Checkbox("Ставить зону фарма в Auto FATE Grind", ref setZone)) { c.SetAfgZone = setZone; p.SaveConfig(); }
+        ImGui.TextDisabled("Твои зоны и очередь классов AFG возвращаются после фарма.");
         ImGui.Separator();
-        ImGui.TextDisabled("Зоны для фарма берутся из настроек Auto FATE Grind.");
+        ImGui.TextDisabled("Если зону не ставить, фарм идёт по зонам из настроек Auto FATE Grind.");
         ImGui.TextDisabled("В LazyCrafter должно быть включено «Prefer a currency shop».");
     }
 }
