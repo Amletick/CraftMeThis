@@ -28,8 +28,14 @@ public sealed class MainWindow : Window
     public override void PreDraw() => Ui.Push();
     public override void PostDraw() => Ui.Pop();
 
+    /// <summary>Height kept free at the bottom for the "will not do" panel (0 when there is nothing to warn about).</summary>
+    private float footer;
+
     public override void Draw()
     {
+        var manual = p.ManualTasks();
+        footer = manual.Count == 0 ? 0 : Math.Min(150f, 44f + manual.Count * ImGui.GetTextLineHeightWithSpacing() * 1.6f);
+
         DrawHeader();
         ImGui.Spacing();
         if (ImGui.BeginTabBar("tabs"))
@@ -40,12 +46,34 @@ public sealed class MainWindow : Window
             if (ImGui.BeginTabItem("  Настройки  ")) { Scroll("settings", DrawSettings); ImGui.EndTabItem(); }
             ImGui.EndTabBar();
         }
+        if (manual.Count > 0) DrawManual(manual);
     }
 
-    private static void Scroll(string id, Action body)
+    /// <summary>Bottom panel: what the plugin will not do by itself for the current cart.</summary>
+    private void DrawManual(System.Collections.Generic.List<string> manual)
+    {
+        ImGui.PushStyleColor(ImGuiCol.ChildBg, Ui.Warn with { W = 0.08f });
+        ImGui.PushStyleColor(ImGuiCol.Border, Ui.Warn with { W = 0.45f });
+        ImGui.PushStyleVar(ImGuiStyleVar.WindowPadding, new Vector2(12, 8));
+        ImGui.BeginChild("manual", new Vector2(-1, -1), true, ImGuiWindowFlags.AlwaysUseWindowPadding);
+        ImGui.PopStyleVar();
+        Ui.Icon(FontAwesomeIcon.ExclamationTriangle, Ui.Warn);
+        ImGui.SameLine();
+        ImGui.TextColored(Ui.Warn, "Это CraftMeThis сам не сделает:");
+        foreach (var m in manual)
+        {
+            ImGui.TextColored(Ui.Warn, "•");
+            ImGui.SameLine();
+            ImGui.TextWrapped(m);
+        }
+        ImGui.EndChild();
+        ImGui.PopStyleColor(2);
+    }
+
+    private void Scroll(string id, Action body)
     {
         ImGui.PushStyleColor(ImGuiCol.ChildBg, Vector4.Zero);
-        ImGui.BeginChild(id, new Vector2(-1, -1), false, ImGuiWindowFlags.None);
+        ImGui.BeginChild(id, new Vector2(-1, footer > 0 ? -footer : -1), false, ImGuiWindowFlags.None);
         ImGui.PopStyleColor();
         ImGui.Spacing();
         body();
@@ -71,11 +99,20 @@ public sealed class MainWindow : Window
         };
         Ui.Pill(label, color);
 
-        // Right-aligned shortcuts to the other plugins' windows.
-        const string lc = "LazyCrafter", afg = "FATE Grind";
+        // Right-aligned shortcuts: the Teamcraft list and the other plugins' windows.
+        const string tc = "Teamcraft", lc = "LazyCrafter", afg = "FATE Grind";
         var style = ImGui.GetStyle();
-        var w = ImGui.CalcTextSize(lc).X + ImGui.CalcTextSize(afg).X + 2 * (style.FramePadding.X * 2 + 22) + style.ItemSpacing.X;
+        var w = ImGui.CalcTextSize(tc).X + ImGui.CalcTextSize(lc).X + ImGui.CalcTextSize(afg).X
+                + 3 * (style.FramePadding.X * 2 + 22) + 2 * style.ItemSpacing.X;
         ImGui.SameLine(ImGui.GetWindowContentRegionMax().X - w);
+        var link = p.TeamcraftLink();
+        ImGui.BeginDisabled(link == null);
+        if (Ui.IconButton(FontAwesomeIcon.ExternalLinkAlt, tc,
+                p.Config.TeamcraftListUrl.Length > 0 ? $"Открыть импортированный список: {p.Config.TeamcraftListUrl}"
+                : link != null ? "Открыть корзину в Teamcraft (создаст там список)" : "Корзина пуста"))
+            p.OpenTeamcraft();
+        ImGui.EndDisabled();
+        ImGui.SameLine();
         if (Ui.IconButton(FontAwesomeIcon.ShoppingCart, lc, "Открыть окно LazyCrafter (/lcraft)")) p.OpenLazyCrafter();
         ImGui.SameLine();
         if (Ui.IconButton(FontAwesomeIcon.Crosshairs, afg, "Открыть окно Auto FATE Grind (/afg)")) p.OpenFateGrind();
@@ -257,6 +294,12 @@ public sealed class MainWindow : Window
                 ImGui.TextWrapped(msg);
                 ImGui.PopStyleColor();
             }
+            if (p.Config.TeamcraftListUrl.Length > 0 && !p.ImportBusy)
+            {
+                if (Ui.IconButton(FontAwesomeIcon.ExternalLinkAlt, "Открыть список в Teamcraft")) p.OpenTeamcraft();
+                ImGui.SameLine();
+                ImGui.TextColored(Ui.Muted, p.Config.TeamcraftListUrl);
+            }
             Ui.EndCard();
         }
 
@@ -276,7 +319,7 @@ public sealed class MainWindow : Window
         ImGui.Checkbox("вместо его корзины", ref sendReplace);
         ImGui.SameLine();
         ImGui.SetCursorPosY(ImGui.GetCursorPosY() + 6);
-        if (Ui.IconButton(FontAwesomeIcon.Trash, "Очистить")) { cart.Clear(); p.SaveConfig(); }
+        if (Ui.IconButton(FontAwesomeIcon.Trash, "Очистить")) p.ClearCart();
 
         if (ImGui.BeginTable("cart", 3, ImGuiTableFlags.RowBg | ImGuiTableFlags.PadOuterX))
         {
@@ -333,7 +376,7 @@ public sealed class MainWindow : Window
         var minLevel = p.Zone?.Zone.MinLevel ?? 0;
         var chosen = c.SwitchJob && minLevel > 0 ? p.Jobs.Pick(c.Jobs, minLevel)?.Job.Id : null;
 
-        if (!ImGui.BeginTable("jobs", 5, ImGuiTableFlags.RowBg | ImGuiTableFlags.ScrollY | ImGuiTableFlags.PadOuterX, new Vector2(-1, -1))) return;
+        if (!ImGui.BeginTable("jobs", 5, ImGuiTableFlags.RowBg | ImGuiTableFlags.ScrollY | ImGuiTableFlags.PadOuterX, new Vector2(-1, footer > 0 ? -footer : -1))) return;
         ImGui.TableSetupScrollFreeze(0, 1);
         ImGui.TableSetupColumn("", ImGuiTableColumnFlags.WidthFixed, 58);
         ImGui.TableSetupColumn("", ImGuiTableColumnFlags.WidthFixed, 28);

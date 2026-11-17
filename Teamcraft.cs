@@ -12,7 +12,11 @@ namespace CraftMeThis;
 /// <summary>An item and amount read from a Teamcraft export, with the recipe if the export named one.</summary>
 public readonly record struct ImportedItem(uint ItemId, uint? RecipeId, int Quantity);
 
-public sealed record ImportResult(List<CartLine> Lines, List<string> Skipped, string? Error);
+/// <param name="Manual">Things the plugin will not do for this list (shown at the bottom of the window).</param>
+public sealed record ImportResult(List<CartLine> Lines, List<string> Skipped, string? Error)
+{
+    public List<string> Manual { get; init; } = new();
+}
 
 /// <summary>
 /// Reads Teamcraft exports:
@@ -65,6 +69,11 @@ public static class Teamcraft
 
     private static readonly Regex ListLink = new(@"ffxivteamcraft\.com/(?:[a-z-]+/)?list/([A-Za-z0-9]{8,})", RegexOptions.IgnoreCase);
     private static readonly HttpClient Http = new() { Timeout = TimeSpan.FromSeconds(20) };
+
+    /// <summary>A Teamcraft import link for a cart: Teamcraft opens it and offers to create a list.</summary>
+    public static string ImportLink(IEnumerable<CartLine> cart, Planner planner) =>
+        "https://ffxivteamcraft.com/import/" + Convert.ToBase64String(Encoding.UTF8.GetBytes(string.Join(";",
+            cart.Where(l => l.Crafts > 0).Select(l => $"{planner.RecipeItem(l.RecipeId)},{l.RecipeId},{l.Crafts * planner.RecipeYield(l.RecipeId)}"))));
 
     /// <summary>The list id of a "ffxivteamcraft.com/list/&lt;id&gt;" link, or null.</summary>
     public static string? ListId(string input)
@@ -130,14 +139,18 @@ public static class Teamcraft
             }
         }
 
+        var manual = new List<string>();
         if (workshop.Count > 0)
-            skipped.Add($"предметы мастерской ({string.Join(", ", workshop)}) собираются в мастерской — в корзину пошли их компоненты");
+        {
+            skipped.Add($"предметы мастерской ({string.Join(", ", workshop)}): в корзину пошли их компоненты");
+            manual.Add($"Сдать этапы в мастерской компании: {string.Join(", ", workshop)}.");
+        }
         if (raw.Count > 0)
-            skipped.Add("сырьё для мастерской не крафтится, его нужно добыть самому: " +
-                        string.Join(", ", raw.OrderByDescending(kv => kv.Value).Select(kv => $"{planner.ItemName(kv.Key)} x{kv.Value}")));
+            manual.Add("Добыть сырьё для мастерской (оно идёт в этапы, а не в крафт): " +
+                       string.Join(", ", raw.OrderByDescending(kv => kv.Value).Select(kv => $"{planner.ItemName(kv.Key)} x{kv.Value}")) + ".");
         if (items.Count == 0)
-            return new ImportResult(new(), skipped, "В списке нет ничего, что можно скрафтить.");
-        return ToCart(items, planner, skipped);
+            return new ImportResult(new(), skipped, "В списке нет ничего, что можно скрафтить.") { Manual = manual };
+        return ToCart(items, planner, skipped) with { Manual = manual };
     }
 
     private static IEnumerable<JsonElement> Values(JsonElement arrayField) =>

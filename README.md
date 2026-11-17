@@ -21,10 +21,20 @@ The header has buttons that open the LazyCrafter (`/lcraft`) and Auto FATE Grind
 
 - **Farm**: plan, gemstone count, farm zone (automatic or manual), the job that will be used, Start/Stop.
 - **Cart**: import from Teamcraft, edit craft counts, send to LazyCrafter (replace its cart or add to it).
+- The **Teamcraft** button in the header opens the imported list, or the plugin's cart as a Teamcraft import.
 - **Jobs**: job priority (up/down arrows), on/off per job, level and gearset.
 - **Settings**: extra gemstones on top, dispatch after farming, idle wait, soft-stop timeout, whether to set the AFG zone.
 
 Commands: `/craftme plan`, `/craftme start`, `/craftme stop`.
+
+## What it will not do
+
+A panel at the bottom of the window lists what is left to you for the current LazyCrafter cart:
+- materials with no gathering node, fishing spot or gil vendor (market board, drops; LazyCrafter opens the board and waits);
+- Gemstone Trader stock that needs a higher shared FATE rank;
+- carts that need more than 1500 gemstones;
+- Free Company workshop phases and their raw materials (from an imported list);
+- taking materials out of the chocobo saddlebag or off retainer sale.
 
 ## Teamcraft import
 

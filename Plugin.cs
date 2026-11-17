@@ -40,6 +40,10 @@ public sealed class Configuration : IPluginConfiguration
     public bool SwitchJob { get; set; } = true;
     /// <summary>Job priority, top first.</summary>
     public List<JobPref> Jobs { get; set; } = new();
+    /// <summary>Teamcraft list the cart was last imported from ("" = none).</summary>
+    public string TeamcraftListUrl { get; set; } = string.Empty;
+    /// <summary>Things the plugin will not do for the imported list (FC workshop phases, workshop raw materials).</summary>
+    public List<string> ImportManual { get; set; } = new();
 }
 
 [Serializable]
@@ -72,6 +76,7 @@ public sealed class Plugin : IDalamudPlugin
     internal readonly Planner Planner;
     internal readonly Zones Zones;
     internal readonly Jobs Jobs;
+    internal readonly Sources Sources;
     private readonly AfgLink afg = new();
     private readonly WindowSystem windows = new("CraftMeThis");
     private readonly MainWindow window;
@@ -99,6 +104,8 @@ public sealed class Plugin : IDalamudPlugin
             new[] { Data.GetExcelSheet<Item>(ClientLanguage.English) });
         Zones = new Zones(Data.GetExcelSheet<FateShop>(), Data.GetExcelSheet<SpecialShop>(), Data.GetExcelSheet<Level>(), Data.GetExcelSheet<ENpcResident>());
         Jobs = new Jobs(Data.GetExcelSheet<ClassJob>());
+        Sources = new Sources(Data.GetExcelSheet<GatheringItem>(), Data.GetExcelSheet<FishParameter>(), Data.GetExcelSheet<SpearfishingItem>(),
+            Data.GetSubrowExcelSheet<GilShopItem>());
         Jobs.Normalize(Config.Jobs);
 
         window = new MainWindow(this);
@@ -227,7 +234,9 @@ public sealed class Plugin : IDalamudPlugin
                     try
                     {
                         var res = Teamcraft.FromListJson(json!, Planner, out var name);
-                        CartMessage = (name.Length > 0 ? $"«{name}»: " : "") + ApplyImport(res, replace);
+                        var msg = ApplyImport(res, replace);
+                        if (res.Error == null) { Config.TeamcraftListUrl = $"https://ffxivteamcraft.com/list/{listId}"; SaveConfig(); }
+                        CartMessage = (name.Length > 0 ? $"«{name}»: " : "") + msg;
                     }
                     catch (Exception ex)
                     {
@@ -245,8 +254,14 @@ public sealed class Plugin : IDalamudPlugin
     {
         if (res.Error != null)
             return res.Error + (res.Skipped.Count > 0 ? " " + string.Join("; ", res.Skipped) : "");
-        if (replace) Config.Cart.Clear();
+        if (replace)
+        {
+            Config.Cart.Clear();
+            Config.ImportManual.Clear();
+            Config.TeamcraftListUrl = string.Empty;
+        }
         foreach (var l in res.Lines) AddToCart(l.RecipeId, l.Crafts, save: false);
+        foreach (var m in res.Manual) if (!Config.ImportManual.Contains(m)) Config.ImportManual.Add(m);
         SaveConfig();
         var msg = $"Импортировано рецептов: {res.Lines.Count}.";
         if (res.Skipped.Count > 0) msg += " Заметки: " + string.Join("; ", res.Skipped.Take(8)) + (res.Skipped.Count > 8 ? " …" : "");
@@ -432,6 +447,47 @@ public sealed class Plugin : IDalamudPlugin
     {
         if (!IsLoaded(LazyCrafter)) Print("LazyCrafter не загружен.");
         else Run("/lcraft");
+    }
+
+    internal void ClearCart()
+    {
+        Config.Cart.Clear();
+        Config.ImportManual.Clear();
+        Config.TeamcraftListUrl = string.Empty;
+        SaveConfig();
+    }
+
+    /// <summary>The imported Teamcraft list, or a Teamcraft import link for the plugin's cart; null when there is nothing.</summary>
+    internal string? TeamcraftLink() =>
+        Config.TeamcraftListUrl.Length > 0 ? Config.TeamcraftListUrl
+        : Config.Cart.Count > 0 ? Teamcraft.ImportLink(Config.Cart.Select(c => new CartLine(c.RecipeId, c.Crafts)), Planner)
+        : null;
+
+    internal void OpenTeamcraft()
+    {
+        if (TeamcraftLink() is { } url) Dalamud.Utility.Util.OpenLink(url);
+        else Print("корзина пуста — нечего открывать в Teamcraft.");
+    }
+
+    /// <summary>What CraftMeThis (with LazyCrafter and Auto FATE Grind) will not do on its own for the LazyCrafter cart.</summary>
+    internal List<string> ManualTasks()
+    {
+        var list = new List<string>(Config.ImportManual);
+
+        var market = Plan.Leaves.Where(kv => Sources.Of(kv.Key) == Source.Other)
+                         .OrderByDescending(kv => kv.Value).Select(kv => $"{Planner.ItemName(kv.Key)} x{kv.Value}").ToList();
+        if (market.Count > 0)
+            list.Add($"Купить на рынке руками (нет ни сбора, ни вендора; LazyCrafter откроет доску и будет ждать, часть может отдать в вылазки ретейнеров): {string.Join(", ", market)}.");
+
+        if (Zone?.Sold.Where(s => s.Rank > 1).ToList() is { Count: > 0 } ranked)
+            list.Add($"Открыть ранг {ranked.Max(s => s.Rank)} общих FATE в {Zone.Zone.Name}: без него торговец не продаст {string.Join(", ", ranked.Select(s => s.Item))}.");
+
+        if (Plan.Gems + Config.Reserve > Planner.GemCap)
+            list.Add($"Корзине нужно {Plan.Gems} биколоров, а больше {Planner.GemCap} не носить: разбей корзину на части.");
+
+        if (Plan.Recipes.Count > 0)
+            list.Add("Достать материалы из седельной сумки и снять их с продажи у ретейнеров: LazyCrafter попросит, но сделать это нужно самому.");
+        return list;
     }
 
     internal void OpenFateGrind()

@@ -15,10 +15,11 @@ public sealed record GemPurchase(uint ItemId, string Name, int Units, int Trades
     public long Gems => (long)Trades * CostPerTrade;
 }
 
-public sealed record GemPlan(IReadOnlyList<GemPurchase> Purchases, IReadOnlyList<string> Recipes)
+/// <param name="Leaves">Raw materials still missing that are neither crafted nor bought for gemstones (crystals excluded).</param>
+public sealed record GemPlan(IReadOnlyList<GemPurchase> Purchases, IReadOnlyList<string> Recipes, IReadOnlyDictionary<uint, int> Leaves)
 {
     public long Gems => Purchases.Sum(p => p.Gems);
-    public static readonly GemPlan Empty = new(Array.Empty<GemPurchase>(), Array.Empty<string>());
+    public static readonly GemPlan Empty = new(Array.Empty<GemPurchase>(), Array.Empty<string>(), new Dictionary<uint, int>());
 }
 
 /// <summary>
@@ -93,6 +94,8 @@ public sealed class Planner
         return recipeByItem.TryGetValue(itemId, out var r) ? (r.RowId, r.AmountResult) : null;
     }
 
+    public int RecipeYield(uint recipeId) => recipes.TryGetRow(recipeId, out var r) ? Math.Max(1, (int)r.AmountResult) : 1;
+
     public bool IsRecipe(uint recipeId) => recipes.TryGetRow(recipeId, out var r) && r.ItemResult.RowId != 0;
 
     /// <summary>Item id by exact (case-insensitive) name; craftable items win over others with the same name.</summary>
@@ -136,6 +139,7 @@ public sealed class Planner
         }
 
         var needUnits = new Dictionary<uint, int>();
+        var leaves = new Dictionary<uint, int>();
         var names = new List<string>();
 
         void Require(uint id, int qty, int depth)
@@ -154,6 +158,8 @@ public sealed class Planner
             }
             if (gemOffers.ContainsKey(id))
                 needUnits[id] = needUnits.GetValueOrDefault(id) + qty;
+            else if (id > 19)
+                leaves[id] = leaves.GetValueOrDefault(id) + qty;
         }
 
         void Craft(Recipe r, int crafts, int depth)
@@ -183,6 +189,6 @@ public sealed class Planner
             })
             .OrderByDescending(p => p.Gems)
             .ToList();
-        return new GemPlan(purchases, names);
+        return new GemPlan(purchases, names, leaves);
     }
 }
