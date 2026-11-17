@@ -94,6 +94,7 @@ public sealed class MainWindow : Window
             Phase.Farming => ("фарм FATE", Ui.Gem),
             Phase.Stopping => ("завершаю FATE", Ui.Warn),
             Phase.Buying => ("покупки", Ui.Accent),
+            Phase.AfgBuying => ("покупка за биколоры", Ui.Gem),
             Phase.Crafting => ("крафт", Ui.Accent),
             Phase.Done => ("готово", Ui.Good),
             Phase.Failed => ("ошибка", Ui.Bad),

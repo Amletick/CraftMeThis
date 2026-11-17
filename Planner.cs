@@ -132,6 +132,16 @@ public sealed class Planner
 
     public bool HasRecipe(uint itemId) => recipeByItem.ContainsKey(itemId);
 
+    /// <summary>Direct ingredients of a recipe (crystals included).</summary>
+    public List<(uint ItemId, int Amount)> Ingredients(uint recipeId)
+    {
+        var list = new List<(uint, int)>();
+        if (!recipes.TryGetRow(recipeId, out var r)) return list;
+        for (var i = 0; i < r.Ingredient.Count; i++)
+            if (r.Ingredient[i].RowId != 0 && r.AmountIngredient[i] > 0) list.Add((r.Ingredient[i].RowId, r.AmountIngredient[i]));
+        return list;
+    }
+
     /// <param name="bagCount">How many of an item are in the bags right now (NQ + HQ).</param>
     /// <param name="buyForGems">Whether a raw material that a Gemstone Trader sells should be bought for gemstones
     /// (default: always). When false it goes to <see cref="GemPlan.Leaves"/> like any other raw material.</param>

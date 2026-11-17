@@ -77,7 +77,7 @@ public sealed class CartEntry
     public int Crafts { get; set; }
 }
 
-public enum Phase { Idle, Preparing, Farming, Stopping, Buying, Crafting, Done, Failed }
+public enum Phase { Idle, Preparing, Farming, Stopping, Buying, AfgBuying, Crafting, Done, Failed }
 
 /// <summary>A material Vulcan will buy from a vendor: target is the bag count to reach.</summary>
 public sealed record VendorBuy(uint ItemId, string Name, int Units, int Target, bool ForGemstones);
@@ -121,8 +121,14 @@ public sealed class Plugin : IDalamudPlugin
     internal List<string> Warnings { get; } = new();
     internal ZoneChoice? Zone { get; private set; }
 
-    internal bool Running => Phase is Phase.Preparing or Phase.Farming or Phase.Stopping or Phase.Buying or Phase.Crafting;
-    private bool Farming => Phase is Phase.Preparing or Phase.Farming or Phase.Stopping;
+    internal bool Running => Phase is Phase.Preparing or Phase.Farming or Phase.Stopping or Phase.Buying or Phase.AfgBuying or Phase.Crafting;
+    private bool Farming => Phase is Phase.Preparing or Phase.Farming or Phase.Stopping or Phase.AfgBuying;
+
+    /// <summary>What follows once Auto FATE Grind has stopped: the vendor run, or crafting (after AFG bought the gemstone items).</summary>
+    private Phase afterStop = Phase.Buying;
+    private List<VendorBuy> afgBuys = new();
+    /// <summary>Cart result items before crafting: item → (bag count, expected gain, name).</summary>
+    private Dictionary<uint, (int Before, int Expected, string Name, uint RecipeId, int Crafts)> craftBaseline = new();
 
     private DateTime nextTick = DateTime.MinValue;
     private DateTime startAt;
@@ -573,6 +579,7 @@ public sealed class Plugin : IDalamudPlugin
             case Phase.Farming: TickFarming(now); break;
             case Phase.Stopping: TickStopping(now); break;
             case Phase.Buying: TickBuying(now); break;
+            case Phase.AfgBuying: TickAfgBuying(now); break;
             case Phase.Crafting: TickCrafting(now); break;
         }
     }
@@ -597,6 +604,7 @@ public sealed class Plugin : IDalamudPlugin
         Run("/afg stop soft");
         stopSentAt = now;
         idleSince = DateTime.MinValue;
+        afterStop = Phase.Buying;
         SetStatus(Phase.Stopping, $"Набрал {Gems}/{Target}. Жду, пока Auto FATE Grind закончит текущий FATE.");
     }
 
@@ -617,7 +625,8 @@ public sealed class Plugin : IDalamudPlugin
         if (now - idleSince < TimeSpan.FromSeconds(Math.Max(2, Config.IdleSeconds))) return;
 
         afg.Restore();
-        EnterBuying();
+        if (afterStop == Phase.Crafting) EnterCrafting();
+        else EnterBuying();
     }
 
     private void TickBuying(DateTime now)
@@ -657,9 +666,60 @@ public sealed class Plugin : IDalamudPlugin
             return;
         }
 
-        var missing = VendorBuys.Where(v => BagCount(v.ItemId) < v.Target).Select(v => $"{v.Name} {BagCount(v.ItemId)}/{v.Target}").ToList();
-        if (missing.Count > 0) Print($"Vulcan купил не всё: {string.Join(", ", missing)}. {Vulcan.VendorStatus}");
+        var missing = VendorBuys.Where(v => BagCount(v.ItemId) < v.Target).ToList();
+        if (missing.Count > 0)
+            Print($"Vulcan купил не всё: {string.Join(", ", missing.Select(v => $"{v.Name} {BagCount(v.ItemId)}/{v.Target}"))}. {Vulcan.VendorStatus}");
+
+        // Gemstone items Vulcan could not buy (e.g. "Timed out opening Kajeel Ja's special shop"):
+        // Auto FATE Grind's own trader hand-off buys them instead.
+        var gemMissing = missing.Where(v => v.ForGemstones).ToList();
+        if (gemMissing.Count > 0 && IsLoaded(AutoFateGrind))
+        {
+            EnterAfgBuying(gemMissing);
+            return;
+        }
         EnterCrafting();
+    }
+
+    private void EnterAfgBuying(List<VendorBuy> items)
+    {
+        afgBuys = items;
+        var gems = 0L;
+        foreach (var v in items)
+        {
+            var p = Plan.Purchases.FirstOrDefault(x => x.ItemId == v.ItemId);
+            if (p == null) continue;
+            var units = Math.Max(0, v.Target - BagCount(v.ItemId));
+            gems += (units + p.ReceivePerTrade - 1) / p.ReceivePerTrade * p.CostPerTrade;
+        }
+        var err = afg.Apply(Config.SetAfgZone && Zone != null ? Zone.Zone.Territory : 0,
+            items.Select(v => (v.ItemId, v.Target)).ToList(), (int)Math.Clamp(gems, 1, Planner.GemCap));
+        if (err != null || !Run("/afg start"))
+        {
+            afg.Restore();
+            Print(err ?? "Команда /afg start не сработала.");
+            EnterCrafting();
+            return;
+        }
+        phaseStartedAt = DateTime.UtcNow;
+        SetStatus(Phase.AfgBuying, $"Vulcan не смог купить за биколоры — покупает Auto FATE Grind: {string.Join(", ", items.Select(v => v.Name))}.");
+    }
+
+    private void TickAfgBuying(DateTime now)
+    {
+        var left = afgBuys.Where(v => BagCount(v.ItemId) < v.Target).ToList();
+        if (left.Count > 0)
+        {
+            Status = $"Auto FATE Grind покупает у Gemstone Trader: осталось {string.Join(", ", left.Select(v => $"{v.Name} {BagCount(v.ItemId)}/{v.Target}"))}.";
+            if (now - phaseStartedAt < TimeSpan.FromMinutes(20)) return;
+            Print("Auto FATE Grind за 20 минут не купил всё — крафчу то, что получится.");
+        }
+        Run("/afg stop soft");
+        stopSentAt = now;
+        idleSince = DateTime.MinValue;
+        forcedStop = false;
+        afterStop = Phase.Crafting;
+        SetStatus(Phase.Stopping, "Покупки за биколоры готовы. Жду, пока Auto FATE Grind остановится.");
     }
 
     private void TickCrafting(DateTime now)
@@ -681,6 +741,13 @@ public sealed class Plugin : IDalamudPlugin
             }
             craftStarted = true;
             phaseStartedAt = now;
+            craftBaseline = new();
+            foreach (var c in Config.Cart)
+            {
+                var item = Planner.RecipeItem(c.RecipeId);
+                if (item == 0 || craftBaseline.ContainsKey(item)) continue;
+                craftBaseline[item] = (BagCount(item), c.Crafts * Planner.RecipeYield(c.RecipeId), Planner.ItemName(item), c.RecipeId, c.Crafts);
+            }
             SetStatus(Phase.Crafting, $"Vulcan собирает и крафтит корзину ({Config.Cart.Count} рецептов).");
             return;
         }
@@ -692,7 +759,30 @@ public sealed class Plugin : IDalamudPlugin
             return;
         }
         RestoreArtisan();
-        SetStatus(Phase.Done, "Готово: Vulcan закончил очередь крафта.");
+        ReportCrafts();
+    }
+
+    /// <summary>Compares the bags with what the cart asked for and says what was not crafted and why.</summary>
+    private void ReportCrafts()
+    {
+        var done = new List<string>();
+        var failed = new List<string>();
+        foreach (var (item, b) in craftBaseline)
+        {
+            var got = Math.Max(0, BagCount(item) - b.Before);
+            if (got >= b.Expected) { done.Add($"{b.Name} +{got}"); continue; }
+            // Ingredients not even enough for one more craft: the usual reason Vulcan skipped the recipe.
+            var lacking = Planner.Ingredients(b.RecipeId)
+                .Where(i => i.ItemId > 19 && BagCount(i.ItemId) < i.Amount)
+                .Select(i => $"{Planner.ItemName(i.ItemId)} {BagCount(i.ItemId)}/{i.Amount}")
+                .ToList();
+            failed.Add($"{b.Name} {got}/{b.Expected}" + (lacking.Count > 0 ? $" (не хватает: {string.Join(", ", lacking)})" : ""));
+        }
+        Recalculate();
+        if (failed.Count == 0)
+            SetStatus(Phase.Done, $"Готово: {string.Join(", ", done)}.");
+        else
+            SetStatus(Phase.Done, $"Vulcan закончил. Скрафчено: {(done.Count > 0 ? string.Join(", ", done) : "ничего")}. Не скрафчено: {string.Join("; ", failed)}.");
     }
 
     private static unsafe bool IsIdle()
