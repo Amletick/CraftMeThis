@@ -18,6 +18,8 @@ LazyCrafter only uses a currency shop when the currency is already there. Bridgi
 
 ## Window (`/craftme` or `/cmt`)
 
+The header has buttons that open the LazyCrafter (`/lcraft`) and Auto FATE Grind (`/afg`) windows.
+
 - **Farm**: plan, gemstone count, farm zone (automatic or manual), the job that will be used, Start/Stop.
 - **Cart**: import from Teamcraft, edit craft counts, send to LazyCrafter (replace its cart or add to it).
 - **Jobs**: job priority (up/down arrows), on/off per job, level and gearset.

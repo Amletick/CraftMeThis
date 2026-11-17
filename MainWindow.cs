@@ -1,14 +1,15 @@
+using System;
 using System.Linq;
 using System.Numerics;
 using Dalamud.Bindings.ImGui;
+using Dalamud.Interface;
 using Dalamud.Interface.Windowing;
 
 namespace CraftMeThis;
 
 public sealed class MainWindow : Window
 {
-    private static readonly Vector4 Warn = new(1f, 0.7f, 0.3f, 1f);
-    private static readonly Vector4 Good = new(0.5f, 0.9f, 0.5f, 1f);
+    private const float RowIcon = 26f;
 
     private readonly Plugin p;
     private string importText = string.Empty;
@@ -18,23 +19,66 @@ public sealed class MainWindow : Window
     public MainWindow(Plugin plugin) : base("CraftMeThis###CraftMeThisMain")
     {
         p = plugin;
-        SizeConstraints = new WindowSizeConstraints { MinimumSize = new Vector2(460, 300), MaximumSize = new Vector2(1600, 1600) };
-        Size = new Vector2(600, 480);
+        SizeConstraints = new WindowSizeConstraints { MinimumSize = new Vector2(520, 420), MaximumSize = new Vector2(1600, 1600) };
+        Size = new Vector2(660, 600);
         SizeCondition = ImGuiCond.FirstUseEver;
     }
 
     public override void OnOpen() => p.Recalculate();
+    public override void PreDraw() => Ui.Push();
+    public override void PostDraw() => Ui.Pop();
 
     public override void Draw()
     {
+        DrawHeader();
+        ImGui.Spacing();
         if (ImGui.BeginTabBar("tabs"))
         {
-            if (ImGui.BeginTabItem("Фарм")) { DrawFarm(); ImGui.EndTabItem(); }
-            if (ImGui.BeginTabItem("Корзина")) { DrawCart(); ImGui.EndTabItem(); }
-            if (ImGui.BeginTabItem("Классы")) { DrawJobs(); ImGui.EndTabItem(); }
-            if (ImGui.BeginTabItem("Настройки")) { DrawSettings(); ImGui.EndTabItem(); }
+            if (ImGui.BeginTabItem("  Фарм  ")) { Scroll("farm", DrawFarm); ImGui.EndTabItem(); }
+            if (ImGui.BeginTabItem($"  Корзина ({p.Config.Cart.Count})  ")) { Scroll("cart", DrawCart); ImGui.EndTabItem(); }
+            if (ImGui.BeginTabItem("  Классы  ")) { DrawJobs(); ImGui.EndTabItem(); }
+            if (ImGui.BeginTabItem("  Настройки  ")) { Scroll("settings", DrawSettings); ImGui.EndTabItem(); }
             ImGui.EndTabBar();
         }
+    }
+
+    private static void Scroll(string id, Action body)
+    {
+        ImGui.PushStyleColor(ImGuiCol.ChildBg, Vector4.Zero);
+        ImGui.BeginChild(id, new Vector2(-1, -1), false, ImGuiWindowFlags.None);
+        ImGui.PopStyleColor();
+        ImGui.Spacing();
+        body();
+        ImGui.EndChild();
+    }
+
+    // ---------------------------------------------------------------- header
+
+    private void DrawHeader()
+    {
+        Ui.Icon(FontAwesomeIcon.Hammer, Ui.Accent);
+        ImGui.SameLine();
+        ImGui.TextColored(Ui.Text, "CraftMeThis");
+        ImGui.SameLine();
+        var (label, color) = p.Phase switch
+        {
+            Phase.Preparing => ("подготовка", Ui.Warn),
+            Phase.Farming => ("фарм FATE", Ui.Gem),
+            Phase.Stopping => ("завершаю FATE", Ui.Warn),
+            Phase.Done => ("готово", Ui.Good),
+            Phase.Failed => ("ошибка", Ui.Bad),
+            _ => ("ожидание", Ui.Muted),
+        };
+        Ui.Pill(label, color);
+
+        // Right-aligned shortcuts to the other plugins' windows.
+        const string lc = "LazyCrafter", afg = "FATE Grind";
+        var style = ImGui.GetStyle();
+        var w = ImGui.CalcTextSize(lc).X + ImGui.CalcTextSize(afg).X + 2 * (style.FramePadding.X * 2 + 22) + style.ItemSpacing.X;
+        ImGui.SameLine(ImGui.GetWindowContentRegionMax().X - w);
+        if (Ui.IconButton(FontAwesomeIcon.ShoppingCart, lc, "Открыть окно LazyCrafter (/lcraft)")) p.OpenLazyCrafter();
+        ImGui.SameLine();
+        if (Ui.IconButton(FontAwesomeIcon.Crosshairs, afg, "Открыть окно Auto FATE Grind (/afg)")) p.OpenFateGrind();
     }
 
     // ---------------------------------------------------------------- farm
@@ -42,65 +86,239 @@ public sealed class MainWindow : Window
     private void DrawFarm()
     {
         var running = p.Running;
-        if (running)
-        {
-            if (ImGui.Button("Остановить")) p.Stop();
-        }
-        else
-        {
-            if (ImGui.Button("Нафармить и запустить корзину")) p.Start();
-            ImGui.SameLine();
-            if (ImGui.Button("Пересчитать")) p.Recalculate();
-        }
-        ImGui.TextWrapped(p.Status);
-        ImGui.Separator();
 
         foreach (var w in p.Warnings)
         {
-            ImGui.PushStyleColor(ImGuiCol.Text, Warn);
+            Ui.Icon(FontAwesomeIcon.ExclamationTriangle, Ui.Warn);
+            ImGui.SameLine();
+            ImGui.PushStyleColor(ImGuiCol.Text, Ui.Warn);
             ImGui.TextWrapped(w);
             ImGui.PopStyleColor();
         }
+        if (p.Warnings.Count > 0) ImGui.Spacing();
 
-        ImGui.TextWrapped($"Корзина LazyCrafter: {(p.Plan.Recipes.Count == 0 ? "—" : string.Join(", ", p.Plan.Recipes))}");
-        ImGui.Text($"Биколоры: есть {(running ? p.Gems : Plugin.GemCount())}, нужно {p.Plan.Gems}" +
-                   (p.Config.Reserve > 0 ? $" + запас {p.Config.Reserve}" : ""));
-        DrawGemTable("gems", p.Plan);
-        ImGui.Separator();
-        DrawZone(running);
+        if (ImGui.BeginTable("farmcards", 2, ImGuiTableFlags.SizingStretchSame))
+        {
+            ImGui.TableNextColumn();
+            DrawGemCard(running);
+            ImGui.TableNextColumn();
+            DrawZoneCard(running);
+            ImGui.EndTable();
+        }
+
+        if (p.Plan.Purchases.Count > 0 && Ui.BeginCard("materials"))
+        {
+            Ui.Caption("Материалы за биколоры");
+            DrawGemTable("gems", p.Plan);
+            Ui.EndCard();
+        }
+
+        if (Ui.BeginCard("lccart"))
+        {
+            Ui.Caption("Корзина LazyCrafter");
+            ImGui.TextWrapped(p.Plan.Recipes.Count == 0 ? "пусто" : string.Join(", ", p.Plan.Recipes));
+            Ui.EndCard();
+        }
+
+        ImGui.Spacing();
+        if (running)
+        {
+            if (Ui.Primary("Остановить", FontAwesomeIcon.Stop, Ui.Bad)) p.Stop();
+        }
+        else
+        {
+            var avail = ImGui.GetContentRegionAvail().X;
+            var label = p.Plan.Purchases.Count > 0 ? "Нафармить биколоры и запустить корзину" : "Запустить корзину LazyCrafter";
+            if (Ui.Primary(label, FontAwesomeIcon.Play, Ui.Accent, avail - 46)) p.Start();
+            ImGui.SameLine();
+            ImGui.SetCursorPosY(ImGui.GetCursorPosY() + 3);
+            if (Ui.IconButton(FontAwesomeIcon.Sync, "", "Пересчитать")) p.Recalculate();
+        }
+        ImGui.TextColored(Ui.Muted, p.Status);
     }
 
-    private void DrawZone(bool running)
+    private void DrawGemCard(bool running)
     {
-        var c = p.Config;
-        var current = p.Zone;
-        ImGui.Text("Зона фарма:");
+        if (!Ui.BeginCard("gemcard", 128)) { Ui.EndCard(); return; }
+        Ui.Caption("Биколоры");
+        Ui.GameIcon(p.Planner.ItemIcon(Planner.BicolorGemstone), 36);
         ImGui.SameLine();
-        ImGui.SetNextItemWidth(220);
-        var preview = c.ZoneOverride == 0 ? $"авто{(current != null ? $" — {current.Zone.Name}" : "")}" : current?.Zone.Name ?? "?";
-        if (!running && ImGui.BeginCombo("##zone", preview))
+        ImGui.BeginGroup();
+        var have = running ? p.Gems : Plugin.GemCount();
+        ImGui.TextColored(Ui.Gem, $"{have}");
+        ImGui.SameLine(0, 4);
+        ImGui.TextColored(Ui.Muted, $"/ {Planner.GemCap}");
+        ImGui.TextColored(Ui.Muted, p.Plan.Gems > 0
+            ? $"нужно {p.Plan.Gems}{(p.Config.Reserve > 0 ? $" + {p.Config.Reserve}" : "")}"
+            : "корзине не нужны");
+        ImGui.EndGroup();
+        Ui.GemBar(have, p.Target);
+        Ui.EndCard();
+    }
+
+    private void DrawZoneCard(bool running)
+    {
+        if (!Ui.BeginCard("zonecard", 128)) { Ui.EndCard(); return; }
+        var c = p.Config;
+        var zone = p.Zone;
+        Ui.Caption("Зона фарма");
+        Ui.Icon(FontAwesomeIcon.MapMarkerAlt, Ui.Accent);
+        ImGui.SameLine();
+        var preview = zone?.Zone.Name ?? "—";
+        if (c.ZoneOverride == 0) preview += "  (авто)";
+        ImGui.SetNextItemWidth(-1);
+        if (running)
         {
-            if (ImGui.Selectable("авто (по материалам корзины)", c.ZoneOverride == 0)) { c.ZoneOverride = 0; p.SaveConfig(); p.Recalculate(); }
+            ImGui.TextUnformatted(preview);
+        }
+        else if (ImGui.BeginCombo("##zone", preview))
+        {
+            if (ImGui.Selectable("Авто — по материалам корзины", c.ZoneOverride == 0)) { c.ZoneOverride = 0; p.SaveConfig(); p.Recalculate(); }
+            ImGui.Separator();
             foreach (var z in p.Zones.All)
             {
-                var label = $"{z.Name}  (ур. {z.MinLevel}+, {z.Trader})";
-                if (ImGui.Selectable(label, c.ZoneOverride == z.Territory)) { c.ZoneOverride = z.Territory; p.SaveConfig(); p.Recalculate(); }
+                if (ImGui.Selectable($"{z.Name}##{z.Territory}", c.ZoneOverride == z.Territory)) { c.ZoneOverride = z.Territory; p.SaveConfig(); p.Recalculate(); }
+                ImGui.SameLine(200);
+                ImGui.TextColored(Ui.Muted, $"ур. {z.MinLevel}+  ·  {z.Trader}");
             }
             ImGui.EndCombo();
         }
-        else if (running)
+
+        if (zone != null)
         {
-            ImGui.Text(preview);
+            var sold = zone.Sold.Count > 0 ? $"{zone.Zone.Trader}: " + string.Join(", ", zone.Sold.Select(s => $"{s.Item} (ранг {s.Rank})")) : zone.Reason;
+            ImGui.PushStyleColor(ImGuiCol.Text, Ui.Muted);
+            ImGui.TextWrapped(sold);
+            ImGui.PopStyleColor();
+
+            var pick = c.SwitchJob ? p.Jobs.Pick(c.Jobs, zone.Zone.MinLevel) : null;
+            if (pick is { } j)
+            {
+                Ui.GameIcon(j.Job.Icon, 20);
+                ImGui.SameLine();
+                Ui.CenteredText($"{j.Job.Abbr} {j.Level}  ·  гирсет {j.Gearset + 1}", 20);
+            }
+            else
+            {
+                ImGui.TextColored(Ui.Muted, c.SwitchJob ? "класс: подходящего нет, останется текущий" : "класс: текущий");
+            }
         }
-        if (current != null)
+        Ui.EndCard();
+    }
+
+    private void DrawGemTable(string id, GemPlan plan)
+    {
+        if (plan.Purchases.Count == 0 || !ImGui.BeginTable(id, 4, ImGuiTableFlags.RowBg | ImGuiTableFlags.PadOuterX)) return;
+        ImGui.TableSetupColumn("Материал", ImGuiTableColumnFlags.WidthStretch);
+        ImGui.TableSetupColumn("Кол-во", ImGuiTableColumnFlags.WidthFixed, 60);
+        ImGui.TableSetupColumn("Цена", ImGuiTableColumnFlags.WidthFixed, 64);
+        ImGui.TableSetupColumn("Итого", ImGuiTableColumnFlags.WidthFixed, 64);
+        ImGui.TableHeadersRow();
+        foreach (var x in plan.Purchases)
         {
-            ImGui.TextDisabled($"{current.Reason}" +
-                               (current.Sold.Count > 0 ? ": " + string.Join(", ", current.Sold.Select(s => $"{s.Item} (ранг {s.Rank})")) : ""));
-            var pick = c.SwitchJob ? p.Jobs.Pick(c.Jobs, current.Zone.MinLevel) : null;
-            ImGui.TextDisabled(c.SwitchJob
-                ? pick is { } j ? $"Класс: {j.Job.Abbr} {j.Level} (гирсет {j.Gearset + 1})" : "Класс: подходящего нет, останется текущий"
-                : "Класс: текущий (смена выключена)");
+            ImGui.TableNextRow();
+            ImGui.TableNextColumn();
+            Ui.GameIcon(p.Planner.ItemIcon(x.ItemId), RowIcon);
+            ImGui.SameLine();
+            Ui.CenteredText(x.Name, RowIcon);
+            ImGui.TableNextColumn(); Ui.CenteredText(x.Units.ToString(), RowIcon);
+            ImGui.TableNextColumn(); Ui.CenteredText(x.ReceivePerTrade > 1 ? $"{x.CostPerTrade}/{x.ReceivePerTrade}" : x.CostPerTrade.ToString(), RowIcon, Ui.Muted);
+            ImGui.TableNextColumn(); Ui.CenteredText(x.Gems.ToString(), RowIcon, Ui.Gem);
         }
+        ImGui.EndTable();
+    }
+
+    // ---------------------------------------------------------------- cart
+
+    private void DrawCart()
+    {
+        if (Ui.BeginCard("import"))
+        {
+            Ui.Caption("Импорт из Teamcraft");
+            ImGui.PushStyleColor(ImGuiCol.Text, Ui.Muted);
+            ImGui.TextWrapped("Ссылка на список (ffxivteamcraft.com/list/…), ссылка импорта, текст списка (Copy as text) или строки «5x Boiled Alpaca Steak».");
+            ImGui.PopStyleColor();
+            ImGui.InputTextMultiline("##import", ref importText, 20000, new Vector2(-1, 70));
+            if (Ui.IconButton(FontAwesomeIcon.Paste, "Из буфера")) importText = ImGui.GetClipboardText() ?? string.Empty;
+            ImGui.SameLine();
+            ImGui.BeginDisabled(p.ImportBusy || importText.Trim().Length == 0);
+            if (Ui.IconButton(p.ImportBusy ? FontAwesomeIcon.Hourglass : FontAwesomeIcon.FileImport, p.ImportBusy ? "Загружаю…" : "Импорт")
+                && p.Import(importText, importReplace) && p.CartMessage.StartsWith("Импортировано"))
+                importText = string.Empty;
+            ImGui.EndDisabled();
+            ImGui.SameLine();
+            ImGui.Checkbox("заменить корзину", ref importReplace);
+
+            var msg = p.CartMessage;
+            if (msg.Length > 0)
+            {
+                var ok = msg.Contains("Импортировано") || msg.StartsWith("Загружаю") || msg.StartsWith("Корзина LazyCrafter") || msg.StartsWith("Добавлено");
+                ImGui.PushStyleColor(ImGuiCol.Text, ok ? Ui.Good : Ui.Warn);
+                ImGui.TextWrapped(msg);
+                ImGui.PopStyleColor();
+            }
+            Ui.EndCard();
+        }
+
+        var cart = p.Config.Cart;
+        if (!Ui.BeginCard("cartlist")) { Ui.EndCard(); return; }
+        Ui.Caption($"Корзина · {cart.Count} рецептов · {cart.Sum(e => e.Crafts)} крафтов");
+        if (cart.Count == 0)
+        {
+            ImGui.TextColored(Ui.Muted, "Пусто — импортируй список выше.");
+            Ui.EndCard();
+            return;
+        }
+
+        if (Ui.Primary("Отправить в LazyCrafter", FontAwesomeIcon.PaperPlane, Ui.Accent, 230)) p.CartMessage = p.SendToLazyCrafter(sendReplace);
+        ImGui.SameLine();
+        ImGui.SetCursorPosY(ImGui.GetCursorPosY() + 6);
+        ImGui.Checkbox("вместо его корзины", ref sendReplace);
+        ImGui.SameLine();
+        ImGui.SetCursorPosY(ImGui.GetCursorPosY() + 6);
+        if (Ui.IconButton(FontAwesomeIcon.Trash, "Очистить")) { cart.Clear(); p.SaveConfig(); }
+
+        if (ImGui.BeginTable("cart", 3, ImGuiTableFlags.RowBg | ImGuiTableFlags.PadOuterX))
+        {
+            ImGui.TableSetupColumn("Рецепт", ImGuiTableColumnFlags.WidthStretch);
+            ImGui.TableSetupColumn("Крафтов", ImGuiTableColumnFlags.WidthFixed, 110);
+            ImGui.TableSetupColumn("", ImGuiTableColumnFlags.WidthFixed, 30);
+            ImGui.TableHeadersRow();
+            CartEntry? remove = null;
+            foreach (var e in cart)
+            {
+                ImGui.PushID((int)e.RecipeId);
+                ImGui.TableNextRow();
+                ImGui.TableNextColumn();
+                Ui.GameIcon(p.Planner.ItemIcon(p.Planner.RecipeItem(e.RecipeId)), RowIcon);
+                ImGui.SameLine();
+                Ui.CenteredText(p.Planner.RecipeName(e.RecipeId), RowIcon);
+                ImGui.TableNextColumn();
+                ImGui.SetNextItemWidth(-1);
+                var crafts = e.Crafts;
+                if (ImGui.InputInt("##n", ref crafts) && crafts > 0) { e.Crafts = crafts; p.SaveConfig(); }
+                ImGui.TableNextColumn();
+                if (Ui.IconButton(FontAwesomeIcon.Times, "", "Убрать")) remove = e;
+                ImGui.PopID();
+            }
+            ImGui.EndTable();
+            if (remove != null) { cart.Remove(remove); p.SaveConfig(); }
+        }
+
+        var plan = p.OwnCartPlan();
+        ImGui.Spacing();
+        if (plan.Gems > 0)
+        {
+            Ui.GameIcon(p.Planner.ItemIcon(Planner.BicolorGemstone), 20);
+            ImGui.SameLine();
+            Ui.CenteredText($"Этой корзине нужно {plan.Gems} биколоров (есть {Plugin.GemCount()})", 20, Ui.Gem);
+            DrawGemTable("owngems", plan);
+        }
+        else
+        {
+            ImGui.TextColored(Ui.Muted, "Биколоры этой корзине не нужны.");
+        }
+        Ui.EndCard();
     }
 
     // ---------------------------------------------------------------- jobs
@@ -108,18 +326,20 @@ public sealed class MainWindow : Window
     private void DrawJobs()
     {
         var c = p.Config;
+        ImGui.Spacing();
         var sw = c.SwitchJob;
         if (ImGui.Checkbox("Переключать класс перед фармом", ref sw)) { c.SwitchJob = sw; p.SaveConfig(); }
-        ImGui.TextDisabled("Берётся первый включённый класс сверху, у которого есть гирсет и хватает уровня для зоны.");
+        ImGui.TextColored(Ui.Muted, "Берётся первый включённый класс сверху, у которого есть гирсет и хватает уровня для зоны.");
         var minLevel = p.Zone?.Zone.MinLevel ?? 0;
+        var chosen = c.SwitchJob && minLevel > 0 ? p.Jobs.Pick(c.Jobs, minLevel)?.Job.Id : null;
 
-        if (!ImGui.BeginTable("jobs", 5, ImGuiTableFlags.RowBg | ImGuiTableFlags.BordersInnerH | ImGuiTableFlags.ScrollY, new Vector2(-1, -1))) return;
+        if (!ImGui.BeginTable("jobs", 5, ImGuiTableFlags.RowBg | ImGuiTableFlags.ScrollY | ImGuiTableFlags.PadOuterX, new Vector2(-1, -1))) return;
         ImGui.TableSetupScrollFreeze(0, 1);
-        ImGui.TableSetupColumn("", ImGuiTableColumnFlags.WidthFixed, 56);
-        ImGui.TableSetupColumn("Вкл", ImGuiTableColumnFlags.WidthFixed, 34);
+        ImGui.TableSetupColumn("", ImGuiTableColumnFlags.WidthFixed, 58);
+        ImGui.TableSetupColumn("", ImGuiTableColumnFlags.WidthFixed, 28);
         ImGui.TableSetupColumn("Класс", ImGuiTableColumnFlags.WidthStretch);
         ImGui.TableSetupColumn("Ур.", ImGuiTableColumnFlags.WidthFixed, 40);
-        ImGui.TableSetupColumn("Гирсет", ImGuiTableColumnFlags.WidthFixed, 60);
+        ImGui.TableSetupColumn("Гирсет", ImGuiTableColumnFlags.WidthFixed, 56);
         ImGui.TableHeadersRow();
 
         int? moveFrom = null, moveTo = null;
@@ -130,6 +350,7 @@ public sealed class MainWindow : Window
             if (job == null) continue;
             ImGui.PushID((int)pref.JobId);
             ImGui.TableNextRow();
+            if (chosen == job.Id) ImGui.TableSetBgColor(ImGuiTableBgTarget.RowBg0, ImGui.GetColorU32(Ui.Accent with { W = 0.14f }));
             ImGui.TableNextColumn();
             if (ImGui.ArrowButton("up", ImGuiDir.Up) && i > 0) { moveFrom = i; moveTo = i - 1; }
             ImGui.SameLine(0, 2);
@@ -138,13 +359,16 @@ public sealed class MainWindow : Window
             var en = pref.Enabled;
             if (ImGui.Checkbox("##en", ref en)) { pref.Enabled = en; p.SaveConfig(); }
             ImGui.TableNextColumn();
-            ImGui.Text($"{i + 1}. {job.Abbr}  {job.Name}");
+            Ui.GameIcon(job.Icon, 22);
+            ImGui.SameLine();
+            Ui.CenteredText($"{i + 1}.  {job.Abbr}  ·  {job.Name}", 22, pref.Enabled ? Ui.Text : Ui.Muted);
+            if (chosen == job.Id) { ImGui.SameLine(); Ui.CenteredText("← будет", 22, Ui.Accent); }
             ImGui.TableNextColumn();
             var lvl = Jobs.Level(job);
-            if (minLevel > 0 && lvl < minLevel) ImGui.TextDisabled(lvl.ToString()); else ImGui.Text(lvl.ToString());
+            Ui.CenteredText(lvl.ToString(), 22, minLevel > 0 && lvl < minLevel ? Ui.Muted : Ui.Good);
             ImGui.TableNextColumn();
             var gs = Jobs.Gearset(job.Id);
-            if (gs >= 0) ImGui.Text((gs + 1).ToString()); else ImGui.TextDisabled("нет");
+            Ui.CenteredText(gs >= 0 ? (gs + 1).ToString() : "нет", 22, gs >= 0 ? Ui.Text : Ui.Muted);
             ImGui.PopID();
         }
         ImGui.EndTable();
@@ -156,109 +380,43 @@ public sealed class MainWindow : Window
         }
     }
 
-    private static void DrawGemTable(string id, GemPlan plan)
-    {
-        if (plan.Purchases.Count == 0 || !ImGui.BeginTable(id, 4, ImGuiTableFlags.RowBg | ImGuiTableFlags.BordersInnerH)) return;
-        ImGui.TableSetupColumn("Материал за биколоры", ImGuiTableColumnFlags.WidthStretch);
-        ImGui.TableSetupColumn("Кол-во", ImGuiTableColumnFlags.WidthFixed, 60);
-        ImGui.TableSetupColumn("Цена", ImGuiTableColumnFlags.WidthFixed, 70);
-        ImGui.TableSetupColumn("Биколоры", ImGuiTableColumnFlags.WidthFixed, 70);
-        ImGui.TableHeadersRow();
-        foreach (var x in plan.Purchases)
-        {
-            ImGui.TableNextRow();
-            ImGui.TableNextColumn(); ImGui.Text(x.Name);
-            ImGui.TableNextColumn(); ImGui.Text(x.Units.ToString());
-            ImGui.TableNextColumn(); ImGui.Text(x.ReceivePerTrade > 1 ? $"{x.CostPerTrade}/{x.ReceivePerTrade}шт" : x.CostPerTrade.ToString());
-            ImGui.TableNextColumn(); ImGui.Text(x.Gems.ToString());
-        }
-        ImGui.EndTable();
-    }
-
-    // ---------------------------------------------------------------- cart
-
-    private void DrawCart()
-    {
-        ImGui.TextWrapped("Вставь ссылку на список Teamcraft (ffxivteamcraft.com/list/...), ссылку импорта, текст списка (Copy as text) или строки вида «5x Boiled Alpaca Steak».");
-        ImGui.InputTextMultiline("##import", ref importText, 20000, new Vector2(-1, 90));
-        if (ImGui.Button("Вставить из буфера")) importText = ImGui.GetClipboardText() ?? string.Empty;
-        ImGui.SameLine();
-        ImGui.BeginDisabled(p.ImportBusy);
-        if (ImGui.Button(p.ImportBusy ? "Загружаю…" : "Импорт") && p.Import(importText, importReplace) && p.CartMessage.StartsWith("Импортировано"))
-            importText = string.Empty;
-        ImGui.EndDisabled();
-        ImGui.SameLine();
-        ImGui.Checkbox("Заменить корзину", ref importReplace);
-
-        var cartMessage = p.CartMessage;
-        if (cartMessage.Length > 0)
-        {
-            ImGui.PushStyleColor(ImGuiCol.Text, cartMessage.Contains("Импортировано") || cartMessage.StartsWith("Загружаю") || cartMessage.StartsWith("Корзина LazyCrafter") || cartMessage.StartsWith("Добавлено") ? Good : Warn);
-            ImGui.TextWrapped(cartMessage);
-            ImGui.PopStyleColor();
-        }
-        ImGui.Separator();
-
-        var cart = p.Config.Cart;
-        if (cart.Count == 0)
-        {
-            ImGui.TextDisabled("Корзина пуста.");
-            return;
-        }
-
-        if (ImGui.Button("Отправить в LazyCrafter")) p.CartMessage = p.SendToLazyCrafter(sendReplace);
-        ImGui.SameLine();
-        ImGui.Checkbox("вместо его корзины", ref sendReplace);
-        ImGui.SameLine();
-        if (ImGui.Button("Очистить")) { cart.Clear(); p.SaveConfig(); }
-
-        if (ImGui.BeginTable("cart", 3, ImGuiTableFlags.RowBg | ImGuiTableFlags.BordersInnerH))
-        {
-            ImGui.TableSetupColumn("Рецепт", ImGuiTableColumnFlags.WidthStretch);
-            ImGui.TableSetupColumn("Крафтов", ImGuiTableColumnFlags.WidthFixed, 110);
-            ImGui.TableSetupColumn("", ImGuiTableColumnFlags.WidthFixed, 30);
-            ImGui.TableHeadersRow();
-            CartEntry? remove = null;
-            foreach (var e in cart)
-            {
-                ImGui.PushID((int)e.RecipeId);
-                ImGui.TableNextRow();
-                ImGui.TableNextColumn(); ImGui.Text(p.Planner.RecipeName(e.RecipeId));
-                ImGui.TableNextColumn();
-                ImGui.SetNextItemWidth(-1);
-                var crafts = e.Crafts;
-                if (ImGui.InputInt("##n", ref crafts) && crafts > 0) { e.Crafts = crafts; p.SaveConfig(); }
-                ImGui.TableNextColumn();
-                if (ImGui.SmallButton("x")) remove = e;
-                ImGui.PopID();
-            }
-            ImGui.EndTable();
-            if (remove != null) { cart.Remove(remove); p.SaveConfig(); }
-        }
-
-        var plan = p.OwnCartPlan();
-        ImGui.Text($"Этой корзине нужно биколоров: {plan.Gems} (есть {Plugin.GemCount()})");
-        DrawGemTable("owngems", plan);
-    }
-
     // ---------------------------------------------------------------- settings
 
     private void DrawSettings()
     {
         var c = p.Config;
-        var reserve = c.Reserve;
-        if (ImGui.InputInt("Запас сверху", ref reserve)) { c.Reserve = System.Math.Max(0, reserve); p.SaveConfig(); }
-        var dispatch = c.DispatchAfterFarming;
-        if (ImGui.Checkbox("Запускать корзину после фарма", ref dispatch)) { c.DispatchAfterFarming = dispatch; p.SaveConfig(); }
-        var idle = c.IdleSeconds;
-        if (ImGui.InputInt("Секунд простоя перед запуском", ref idle)) { c.IdleSeconds = System.Math.Clamp(idle, 2, 60); p.SaveConfig(); }
-        var timeout = c.SoftStopTimeoutMinutes;
-        if (ImGui.InputInt("Ждать мягкую остановку, мин", ref timeout)) { c.SoftStopTimeoutMinutes = System.Math.Clamp(timeout, 1, 30); p.SaveConfig(); }
-        var setZone = c.SetAfgZone;
-        if (ImGui.Checkbox("Ставить зону фарма в Auto FATE Grind", ref setZone)) { c.SetAfgZone = setZone; p.SaveConfig(); }
-        ImGui.TextDisabled("Твои зоны и очередь классов AFG возвращаются после фарма.");
-        ImGui.Separator();
-        ImGui.TextDisabled("Если зону не ставить, фарм идёт по зонам из настроек Auto FATE Grind.");
-        ImGui.TextDisabled("В LazyCrafter должно быть включено «Prefer a currency shop».");
+        if (Ui.BeginCard("set-farm"))
+        {
+            Ui.Caption("Фарм");
+            ImGui.SetNextItemWidth(120);
+            var reserve = c.Reserve;
+            if (ImGui.InputInt("Запас биколоров сверху", ref reserve)) { c.Reserve = Math.Max(0, reserve); p.SaveConfig(); }
+            var setZone = c.SetAfgZone;
+            if (ImGui.Checkbox("Ставить зону фарма в Auto FATE Grind", ref setZone)) { c.SetAfgZone = setZone; p.SaveConfig(); }
+            ImGui.TextColored(Ui.Muted, "Твои зоны и очередь классов AFG возвращаются после фарма.");
+            Ui.EndCard();
+        }
+        if (Ui.BeginCard("set-handoff"))
+        {
+            Ui.Caption("Передача в LazyCrafter");
+            var dispatch = c.DispatchAfterFarming;
+            if (ImGui.Checkbox("Запускать корзину после фарма", ref dispatch)) { c.DispatchAfterFarming = dispatch; p.SaveConfig(); }
+            ImGui.SetNextItemWidth(120);
+            var idle = c.IdleSeconds;
+            if (ImGui.InputInt("Секунд простоя перед запуском", ref idle)) { c.IdleSeconds = Math.Clamp(idle, 2, 60); p.SaveConfig(); }
+            ImGui.SetNextItemWidth(120);
+            var timeout = c.SoftStopTimeoutMinutes;
+            if (ImGui.InputInt("Ждать мягкую остановку AFG, мин", ref timeout)) { c.SoftStopTimeoutMinutes = Math.Clamp(timeout, 1, 30); p.SaveConfig(); }
+            Ui.EndCard();
+        }
+        if (Ui.BeginCard("set-req"))
+        {
+            Ui.Caption("Нужно настроить в других плагинах");
+            Ui.Icon(FontAwesomeIcon.ShoppingCart, Ui.Accent); ImGui.SameLine();
+            ImGui.TextWrapped("LazyCrafter: включить «Prefer a currency shop».");
+            Ui.Icon(FontAwesomeIcon.Crosshairs, Ui.Accent); ImGui.SameLine();
+            ImGui.TextWrapped("Auto FATE Grind: пустой список покупок за биколоры.");
+            Ui.EndCard();
+        }
     }
 }

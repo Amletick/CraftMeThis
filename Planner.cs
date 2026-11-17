@@ -116,6 +116,10 @@ public sealed class Planner
         return itemByName.TryGetValue(name.Trim(), out var id) ? id : 0;
     }
 
+    public uint ItemIcon(uint id) => items.TryGetRow(id, out var it) ? it.Icon : 0u;
+
+    public uint RecipeItem(uint recipeId) => recipes.TryGetRow(recipeId, out var r) ? r.ItemResult.RowId : 0u;
+
     public string ItemName(uint id) => items.TryGetRow(id, out var it) ? it.Name.ExtractText() : $"#{id}";
 
     public string RecipeName(uint recipeId) =>

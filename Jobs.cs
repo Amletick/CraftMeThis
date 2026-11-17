@@ -15,7 +15,11 @@ public sealed class JobPref
     public bool Enabled { get; set; } = true;
 }
 
-public sealed record JobInfo(uint Id, string Abbr, string Name, byte Role, int ExpIndex);
+public sealed record JobInfo(uint Id, string Abbr, string Name, byte Role, int ExpIndex)
+{
+    /// <summary>Framed job icon.</summary>
+    public uint Icon => 62100 + Id;
+}
 
 /// <summary>Combat jobs, their levels and gearsets; picks the first job in the user's priority order that can farm a zone.</summary>
 public sealed class Jobs

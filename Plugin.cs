@@ -61,6 +61,7 @@ public sealed class Plugin : IDalamudPlugin
     [PluginService] internal static ICondition Condition { get; private set; } = null!;
     [PluginService] internal static IClientState ClientState { get; private set; } = null!;
     [PluginService] internal static IPluginLog Log { get; private set; } = null!;
+    [PluginService] internal static ITextureProvider Textures { get; private set; } = null!;
 
     private const string Cmd = "/craftme";
     private const string CmdShort = "/cmt";
@@ -426,6 +427,18 @@ public sealed class Plugin : IDalamudPlugin
         {
             SetStatus(Phase.Done, $"Биколоры есть ({Gems}). Корзину запусти сам.");
         }
+    }
+
+    internal void OpenLazyCrafter()
+    {
+        if (!IsLoaded(LazyCrafter)) Print("LazyCrafter не загружен.");
+        else Run("/lcraft");
+    }
+
+    internal void OpenFateGrind()
+    {
+        if (!IsLoaded(AutoFateGrind)) Print("Auto FATE Grind не загружен.");
+        else Run("/afg");
     }
 
     private void Dispatch()
