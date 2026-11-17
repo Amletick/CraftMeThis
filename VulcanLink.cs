@@ -175,6 +175,9 @@ public sealed class VulcanLink
             var add = lt.GetMethod("AddRecipe", Any, new[] { typeof(uint), typeof(int) })!;
             foreach (var l in cart) if (l.Crafts > 0) add.Invoke(list, new object[] { l.RecipeId, l.Crafts });
             lt.GetProperty("RetainerRestock", Any)?.SetValue(list, retainerRestock);
+            // CraftMeThis plans with what is already in the bags (a leftover Cooking Mezcal means no pineapples to buy),
+            // so Vulcan must skip precrafts that are already there too, or it re-crafts them and runs out of materials.
+            lt.GetProperty("SkipIfEnough", Any)?.SetValue(list, true);
             lt.GetMethod("BuildExpandedList", Any, Type.EmptyTypes)?.Invoke(list, null);
             mt.GetMethod("SaveList", Any)?.Invoke(mgr, new[] { list });
             return list;
