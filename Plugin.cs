@@ -50,6 +50,11 @@ public sealed class Configuration : IPluginConfiguration
     public bool ToggleArtisan { get; set; } = true;
     /// <summary>…and load it again afterwards.</summary>
     public bool ReenableArtisan { get; set; } = true;
+    /// <summary>
+    /// Resume mode ("Include Final Crafts" in Vulcan): the cart counts as a target amount, so final crafts are reduced by
+    /// what is already in the bags. Turned on after a run that left cart lines unfinished, off after a clean run or a new cart.
+    /// </summary>
+    public bool ResumeFinals { get; set; }
     /// <summary>How each raw material is obtained, chosen on the Materials tab (missing = automatic).</summary>
     public Dictionary<uint, Route> Routes { get; set; } = new();
 }
@@ -211,11 +216,35 @@ public sealed class Plugin : IDalamudPlugin
 
     internal IReadOnlyList<CartLine> CartLines() => Config.Cart.Select(c => new CartLine(c.RecipeId, c.Crafts)).ToList();
 
+    /// <summary>The crafts still to do: the cart itself, or in resume mode only what the bags do not cover yet (as Vulcan counts it).</summary>
+    internal IReadOnlyList<CartLine> EffectiveCart()
+    {
+        if (!Config.ResumeFinals) return CartLines();
+        var lines = new List<CartLine>();
+        foreach (var c in Config.Cart)
+        {
+            var yield = Planner.RecipeYield(c.RecipeId);
+            var left = Math.Max(0, c.Crafts * yield - BagCount(Planner.RecipeItem(c.RecipeId)));
+            var crafts = (left + yield - 1) / yield;
+            if (crafts > 0) lines.Add(new CartLine(c.RecipeId, crafts));
+        }
+        return lines;
+    }
+
+    internal void SetResume(bool on)
+    {
+        if (Config.ResumeFinals == on) return;
+        Config.ResumeFinals = on;
+        SaveConfig();
+        Recalculate();
+        SyncVulcanList();
+    }
+
     internal void Recalculate()
     {
         Warnings.Clear();
         Gems = GemCount();
-        Plan = Planner.Build(CartLines(), BagCount, id => RouteOf(id) == Route.Bicolor);
+        Plan = Planner.Build(EffectiveCart(), BagCount, id => RouteOf(id) == Route.Bicolor);
         Target = (int)Math.Min(Planner.GemCap, Plan.Gems + Math.Max(0, Config.Reserve));
         if (Plan.Gems + Config.Reserve > Planner.GemCap)
             Warnings.Add($"Корзине нужно {Plan.Gems} биколоров, а больше {Planner.GemCap} держать нельзя. Уменьши корзину или запусти её в несколько заходов.");
@@ -332,6 +361,7 @@ public sealed class Plugin : IDalamudPlugin
             Config.Cart.Clear();
             Config.ImportManual.Clear();
             Config.TeamcraftListUrl = string.Empty;
+            Config.ResumeFinals = false;
         }
         foreach (var l in res.Lines) AddToCart(l.RecipeId, l.Crafts, save: false);
         foreach (var m in res.Manual) if (!Config.ImportManual.Contains(m)) Config.ImportManual.Add(m);
@@ -354,6 +384,7 @@ public sealed class Plugin : IDalamudPlugin
 
     internal void ClearCart()
     {
+        Config.ResumeFinals = false;
         Config.Cart.Clear();
         Config.ImportManual.Clear();
         Config.TeamcraftListUrl = string.Empty;
@@ -388,7 +419,7 @@ public sealed class Plugin : IDalamudPlugin
     {
         if (!IsLoaded(GatherBuddy)) { Print("GatherBuddy Reborn не загружен."); return; }
         if (Config.Cart.Count == 0) { Print("корзина пуста — нечего показывать."); return; }
-        if (Vulcan.SyncList(CartLines(), Config.UseRetainers, out var err) == null) { Print(err!); return; }
+        if (Vulcan.SyncList(CartLines(), Config.UseRetainers, Config.ResumeFinals, out var err) == null) { Print(err!); return; }
         Run($"/vulcan {VulcanLink.ListName}");
         materialsUntil = DateTime.UtcNow.AddSeconds(5);
     }
@@ -397,7 +428,7 @@ public sealed class Plugin : IDalamudPlugin
     private void SyncVulcanList()
     {
         if (Running || Config.Cart.Count == 0 || !IsLoaded(GatherBuddy)) return;
-        if (Vulcan.SyncList(CartLines(), Config.UseRetainers, out var err) == null) Log.Warning(err ?? "Vulcan sync failed");
+        if (Vulcan.SyncList(CartLines(), Config.UseRetainers, Config.ResumeFinals, out var err) == null) Log.Warning(err ?? "Vulcan sync failed");
     }
 
     internal void OpenVulcan()
@@ -449,6 +480,11 @@ public sealed class Plugin : IDalamudPlugin
         if (!IsLoaded(GatherBuddy))
         {
             SetStatus(Phase.Failed, "GatherBuddy Reborn не загружен: покупки и крафт делает его Vulcan.");
+            return;
+        }
+        if (EffectiveCart().Count == 0)
+        {
+            SetStatus(Phase.Done, "Докрафт: всё из корзины уже в сумке, делать нечего.");
             return;
         }
         if (Plan.Gems == 0 || Gems >= Target || !Config.BuyFromVendors)
@@ -738,7 +774,7 @@ public sealed class Plugin : IDalamudPlugin
                     SetStatus(Phase.Failed, "Artisan так и не выгрузился, а Vulcan не крафтит при загруженном Artisan.");
                 return;
             }
-            var err = Vulcan.StartCrafting(CartLines(), Config.UseRetainers);
+            var err = Vulcan.StartCrafting(CartLines(), Config.UseRetainers, Config.ResumeFinals);
             if (err != null)
             {
                 RestoreArtisan();
@@ -749,7 +785,7 @@ public sealed class Plugin : IDalamudPlugin
             phaseStartedAt = now;
             craftBaseline = new();
             FailedItems.Clear();
-            foreach (var c in Config.Cart)
+            foreach (var c in EffectiveCart())
             {
                 var item = Planner.RecipeItem(c.RecipeId);
                 if (item == 0 || craftBaseline.ContainsKey(item)) continue;
@@ -786,11 +822,16 @@ public sealed class Plugin : IDalamudPlugin
             FailedItems.Add(item);
             failed.Add($"{b.Name} {got}/{b.Expected}" + (lacking.Count > 0 ? $" (не хватает: {string.Join(", ", lacking)})" : ""));
         }
+        // A failed run switches to resume mode, so the next start only crafts what is still missing.
+        Config.ResumeFinals = failed.Count > 0;
+        SaveConfig();
         Recalculate();
+        SyncVulcanList();
         if (failed.Count == 0)
-            SetStatus(Phase.Done, $"Готово: {string.Join(", ", done)}.");
+            SetStatus(Phase.Done, $"Готово: {(done.Count > 0 ? string.Join(", ", done) : "всё уже было в сумке")}.");
         else
-            SetStatus(Phase.Done, $"Vulcan закончил. Скрафчено: {(done.Count > 0 ? string.Join(", ", done) : "ничего")}. Не скрафчено: {string.Join("; ", failed)}.");
+            SetStatus(Phase.Done, $"Vulcan закончил. Скрафчено: {(done.Count > 0 ? string.Join(", ", done) : "ничего")}. Не скрафчено: {string.Join("; ", failed)}. "
+                + "Следующий запуск докрафтит только недостающее (Include Final Crafts).");
     }
 
     private static unsafe bool IsIdle()

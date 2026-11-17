@@ -153,7 +153,7 @@ public sealed class VulcanLink
     /// Makes Vulcan's persistent crafting list "CraftMeThis" equal to the cart (created if missing), so Vulcan's own
     /// Materials window shows the cart. Returns the list object, or null with an error.
     /// </summary>
-    public object? SyncList(IReadOnlyList<CartLine> cart, bool retainerRestock, out string? error)
+    public object? SyncList(IReadOnlyList<CartLine> cart, bool retainerRestock, bool skipFinalIfEnough, out string? error)
     {
         if (!Ready(out error)) return null;
         try
@@ -178,6 +178,8 @@ public sealed class VulcanLink
             // CraftMeThis plans with what is already in the bags (a leftover Cooking Mezcal means no pineapples to buy),
             // so Vulcan must skip precrafts that are already there too, or it re-crafts them and runs out of materials.
             lt.GetProperty("SkipIfEnough", Any)?.SetValue(list, true);
+            // "Include Final Crafts": after a failed run, final crafts are reduced by what is already in the bags.
+            lt.GetProperty("SkipFinalIfEnough", Any)?.SetValue(list, skipFinalIfEnough);
             lt.GetMethod("BuildExpandedList", Any, Type.EmptyTypes)?.Invoke(list, null);
             mt.GetMethod("SaveList", Any)?.Invoke(mgr, new[] { list });
             return list;
@@ -190,9 +192,9 @@ public sealed class VulcanLink
     }
 
     /// <summary>Syncs the "CraftMeThis" list and starts Vulcan's gather + craft queue on it.</summary>
-    public string? StartCrafting(IReadOnlyList<CartLine> cart, bool retainerRestock)
+    public string? StartCrafting(IReadOnlyList<CartLine> cart, bool retainerRestock, bool skipFinalIfEnough)
     {
-        var list = SyncList(cart, retainerRestock, out var err);
+        var list = SyncList(cart, retainerRestock, skipFinalIfEnough, out var err);
         if (list == null) return err;
         try
         {

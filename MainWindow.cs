@@ -176,6 +176,16 @@ public sealed class MainWindow : Window
             Ui.EndCard();
         }
 
+        if (p.Config.ResumeFinals && Ui.BeginCard("resume"))
+        {
+            Ui.Icon(FontAwesomeIcon.Redo, Ui.Warn);
+            ImGui.SameLine();
+            ImGui.TextColored(Ui.Warn, "Докрафт: прошлый прогон не всё сделал, теперь считается только недостающее (Include Final Crafts).");
+            ImGui.TextColored(Ui.Muted, "Строки, которых в сумке уже хватает, пропускаются — даже если их скрафтили раньше, не в этот раз.");
+            if (Ui.IconButton(FontAwesomeIcon.Times, "Выключить докрафт")) p.SetResume(false);
+            Ui.EndCard();
+        }
+
         if (Ui.BeginCard("cartsum"))
         {
             Ui.Caption("Корзина");
@@ -641,6 +651,9 @@ public sealed class MainWindow : Window
             if (ImGui.Checkbox("Закупать у вендоров (гил, GC, биколоры…)", ref buy)) { c.BuyFromVendors = buy; p.SaveConfig(); }
             var craft = c.CraftAfterBuying;
             if (ImGui.Checkbox("Крафтить после закупки (сбор недостающего + крафт)", ref craft)) { c.CraftAfterBuying = craft; p.SaveConfig(); }
+            var resume = c.ResumeFinals;
+            if (ImGui.Checkbox("Докрафт: считать корзину целевым количеством (Include Final Crafts)", ref resume)) p.SetResume(resume);
+            ImGui.TextColored(Ui.Muted, "Включается сам после прогона, где Vulcan что-то не скрафтил; выключается после удачного прогона или новой корзины.");
             var ret = c.UseRetainers;
             if (ImGui.Checkbox("Брать материалы у ретейнеров (нужен Allagan Tools)", ref ret)) { c.UseRetainers = ret; p.SaveConfig(); }
             var toggle = c.ToggleArtisan;

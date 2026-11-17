@@ -41,7 +41,7 @@ public static class CraftTree
     public static List<TreeNode> Build(Plugin p)
     {
         var roots = new List<TreeNode>();
-        foreach (var c in p.Config.Cart)
+        foreach (var c in p.EffectiveCart())
         {
             var item = p.Planner.RecipeItem(c.RecipeId);
             if (item == 0) continue;
