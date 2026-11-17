@@ -1,43 +1,68 @@
 using System;
+using System.Collections;
 using System.Collections.Generic;
 using System.Reflection;
 
 namespace CraftMeThis;
 
 /// <summary>
-/// Auto FATE Grind has no IPC. Its settings live in the static AutoFateGrind.Plugin.Cfg (Configuration), so the farm
-/// zone is set there through reflection before "/afg start", and the user's own zones are put back afterwards.
-/// Its own class queue is switched off for the run because this plugin picks the job itself.
+/// Auto FATE Grind has no IPC. Its settings live in the static AutoFateGrind.Plugin.Cfg (Configuration), so this sets
+/// them through reflection before "/afg start" and puts the user's values back afterwards:
+///  * SelectedZones — the farm zone;
+///  * ApplyClassOnStart — off, this plugin picks the job;
+///  * TradeList / TradeOnCap / TradeThreshold / SpendMode / KeepGemstonesReserve / AfterTrade — AFG's own
+///    "buy from the Gemstone Trader" hand-off: once the wallet reaches the threshold it travels to the trader,
+///    buys each listed item up to its StopAtCount and, with AfterTrade = Stop, ends the run.
+///    LazyCrafter cannot do this purchase itself: it does not know Gemstone Traders (FateShop NPCs) at all.
 /// </summary>
 public sealed class AfgLink
 {
     private const BindingFlags Any = BindingFlags.Instance | BindingFlags.Static | BindingFlags.Public | BindingFlags.NonPublic;
 
-    private List<uint>? savedZones;
-    private bool? savedApplyClass;
+    /// <summary>Original values of the properties changed for this run (lists are saved as copies).</summary>
+    private readonly Dictionary<string, object?> saved = new();
 
-    public bool HasSavedState => savedZones != null || savedApplyClass != null;
+    public bool HasSavedState => saved.Count > 0;
 
+    /// <param name="territory">Farm zone, or 0 to keep the user's zones.</param>
+    /// <param name="purchases">Items to buy from the Gemstone Trader and the bag count to stop at.</param>
+    /// <param name="threshold">Gemstones at which AFG goes trading.</param>
     /// <returns>null on success, otherwise what went wrong.</returns>
-    public string? Apply(uint territory)
+    public string? Apply(uint territory, IReadOnlyList<(uint ItemId, int StopAt)> purchases, int threshold)
     {
         var cfg = Config(out var err);
         if (cfg == null) return err;
         try
         {
             var t = cfg.GetType();
-            var zonesProp = t.GetProperty("SelectedZones", Any);
-            var applyProp = t.GetProperty("ApplyClassOnStart", Any);
-            if (zonesProp?.GetValue(cfg) is not List<uint> zones) return "У Auto FATE Grind нет SelectedZones — возможно, изменилась его версия.";
 
-            savedZones ??= new List<uint>(zones);
-            zones.Clear();
-            zones.Add(territory);
-
-            if (applyProp != null && applyProp.GetValue(cfg) is bool apply)
+            if (territory != 0)
             {
-                savedApplyClass ??= apply;
-                applyProp.SetValue(cfg, false);
+                if (Get(cfg, "SelectedZones") is not List<uint> zones) return "У Auto FATE Grind нет SelectedZones — возможно, изменилась его версия.";
+                Remember(cfg, "SelectedZones");
+                zones.Clear();
+                zones.Add(territory);
+            }
+            Set(cfg, "ApplyClassOnStart", false);
+
+            if (purchases.Count > 0)
+            {
+                if (Get(cfg, "TradeList") is not IList list) return "У Auto FATE Grind нет TradeList — возможно, изменилась его версия.";
+                var entryType = list.GetType().GetGenericArguments()[0];
+                Remember(cfg, "TradeList");
+                list.Clear();
+                foreach (var (item, stopAt) in purchases)
+                {
+                    var e = Activator.CreateInstance(entryType)!;
+                    entryType.GetProperty("ItemId", Any)!.SetValue(e, item);
+                    entryType.GetProperty("StopAtCount", Any)!.SetValue(e, stopAt);
+                    list.Add(e);
+                }
+                Set(cfg, "TradeOnCap", true);
+                Set(cfg, "TradeThreshold", Math.Clamp(threshold, 1, Planner.GemCap));
+                Set(cfg, "KeepGemstonesReserve", 0);
+                SetEnum(cfg, "SpendMode", "SpendAll");
+                SetEnum(cfg, "AfterTrade", "Stop");
             }
             Save(cfg);
             return null;
@@ -48,7 +73,7 @@ public sealed class AfgLink
         }
     }
 
-    /// <summary>Puts back the zones and class-queue switch the user had before the run.</summary>
+    /// <summary>Puts back everything <see cref="Apply"/> changed.</summary>
     public void Restore()
     {
         if (!HasSavedState) return;
@@ -57,20 +82,61 @@ public sealed class AfgLink
         try
         {
             var t = cfg.GetType();
-            if (savedZones != null && t.GetProperty("SelectedZones", Any)?.GetValue(cfg) is List<uint> zones)
+            foreach (var (name, value) in saved)
             {
-                zones.Clear();
-                zones.AddRange(savedZones);
+                var prop = t.GetProperty(name, Any);
+                if (prop == null) continue;
+                if (value is IList copy && prop.GetValue(cfg) is IList live)
+                {
+                    live.Clear();
+                    foreach (var x in copy) live.Add(x);
+                }
+                else
+                {
+                    prop.SetValue(cfg, value);
+                }
             }
-            if (savedApplyClass is { } apply) t.GetProperty("ApplyClassOnStart", Any)?.SetValue(cfg, apply);
             Save(cfg);
         }
         catch (Exception ex)
         {
             Plugin.Log.Warning($"Auto FATE Grind settings restore failed: {ex.Message}");
         }
-        savedZones = null;
-        savedApplyClass = null;
+        saved.Clear();
+    }
+
+    private static object? Get(object cfg, string name) => cfg.GetType().GetProperty(name, Any)?.GetValue(cfg);
+
+    private void Remember(object cfg, string name)
+    {
+        if (saved.ContainsKey(name)) return;
+        var value = Get(cfg, name);
+        if (value is IList list)
+        {
+            var copy = (IList)Activator.CreateInstance(list.GetType())!;
+            foreach (var x in list) copy.Add(x);
+            saved[name] = copy;
+        }
+        else
+        {
+            saved[name] = value;
+        }
+    }
+
+    private void Set(object cfg, string name, object value)
+    {
+        var prop = cfg.GetType().GetProperty(name, Any);
+        if (prop == null) return;
+        Remember(cfg, name);
+        prop.SetValue(cfg, Convert.ChangeType(value, prop.PropertyType));
+    }
+
+    private void SetEnum(object cfg, string name, string member)
+    {
+        var prop = cfg.GetType().GetProperty(name, Any);
+        if (prop == null || !prop.PropertyType.IsEnum) return;
+        Remember(cfg, name);
+        prop.SetValue(cfg, Enum.Parse(prop.PropertyType, member));
     }
 
     private static object? Config(out string? error)

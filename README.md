@@ -9,12 +9,11 @@ a Teamcraft list goes in, and crafted items come out.
 3. **Zone.** Farm in the field zone whose Gemstone Trader sells those materials. When only city traders sell them,
    use the highest-level zone of that expansion. You can also pick the zone by hand.
 4. **Job.** Switch to the first enabled job in your priority list that has a gearset and the level for that zone.
-5. **Farm.** Put the zone into Auto FATE Grind, run `/afg start`, then `/afg stop soft` once you have enough gemstones.
-   Your own AFG zones and class-queue setting are restored afterwards.
-6. **Craft.** Once the character is idle, run `/lcraft dispatch`. LazyCrafter now buys from the Gemstone Trader
-   instead of the market board.
+5. **Farm and buy.** Give Auto FATE Grind the zone and a shopping list, then run `/afg start`. AFG farms until it has
+   enough gemstones, buys the materials from the Gemstone Trader and stops. Your own AFG settings are restored afterwards.
+6. **Craft.** Once the materials are in the bags and the character is idle, run `/lcraft dispatch`.
 
-LazyCrafter only uses a currency shop when the currency is already there. Bridging that gap is the point of this plugin.
+LazyCrafter cannot buy from Gemstone Traders. Bridging that gap is the point of this plugin.
 
 ## Window (`/craftme` or `/cmt`)
 
@@ -41,8 +40,11 @@ Teamcraft amounts are items, so they are converted to crafts using the recipe yi
 
 ## Requirements and limits
 
-- LazyCrafter with **Prefer a currency shop** enabled.
-- Auto FATE Grind with an **empty** gemstone shopping list, so that it does not spend the gemstones.
+- The gemstone materials are bought by **Auto FATE Grind**. LazyCrafter does not know Gemstone Traders (FateShop NPCs),
+  so it always sends those materials to the market board. For the run, CraftMeThis gives AFG a shopping list
+  (each item up to the amount needed), a trade threshold equal to the gemstones needed, "spend all" and "stop after
+  trade". AFG farms, travels to the trader, buys and stops. Then the cart is dispatched with the materials already in
+  the bags. AFG's own settings are restored afterwards.
 - Bicolor Gemstones are capped at 1500.
 - Trader stock depends on the zone's shared FATE rank; the plugin shows the rank each material needs.
 - Zones: Endwalker and Dawntrail field zones (those whose Gemstone Trader is placed in the Level sheet).

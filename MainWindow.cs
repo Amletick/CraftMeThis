@@ -411,11 +411,9 @@ public sealed class MainWindow : Window
         }
         if (Ui.BeginCard("set-req"))
         {
-            Ui.Caption("Нужно настроить в других плагинах");
-            Ui.Icon(FontAwesomeIcon.ShoppingCart, Ui.Accent); ImGui.SameLine();
-            ImGui.TextWrapped("LazyCrafter: включить «Prefer a currency shop».");
+            Ui.Caption("Как покупаются материалы за биколоры");
             Ui.Icon(FontAwesomeIcon.Crosshairs, Ui.Accent); ImGui.SameLine();
-            ImGui.TextWrapped("Auto FATE Grind: пустой список покупок за биколоры.");
+            ImGui.TextWrapped("LazyCrafter не знает торговцев биколорами, поэтому покупает Auto FATE Grind: на время запуска CraftMeThis подставляет ему список покупок, порог и «стоп после покупки», а потом возвращает твои настройки.");
             Ui.EndCard();
         }
     }

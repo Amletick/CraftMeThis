@@ -164,7 +164,6 @@ public sealed class Plugin : IDalamudPlugin
 
         if (!IsLoaded(LazyCrafter)) Warnings.Add("LazyCrafter не загружен.");
         if (!IsLoaded(AutoFateGrind)) Warnings.Add("Auto FATE Grind не загружен.");
-        CheckAfgConfig();
 
         Zone = Config.ZoneOverride != 0 && Zones.Get(Config.ZoneOverride) is { } manual
             ? new ZoneChoice(manual, "выбрана вручную", Array.Empty<(string, int)>())
@@ -199,26 +198,6 @@ public sealed class Plugin : IDalamudPlugin
         {
             error = $"Не удалось прочитать корзину LazyCrafter ({path}): {ex.Message}";
             return new List<CartLine>();
-        }
-    }
-
-    private void CheckAfgConfig()
-    {
-        var path = Path.Combine(Pi.ConfigDirectory.Parent!.FullName, AutoFateGrind + ".json");
-        try
-        {
-            using var fs = new FileStream(path, FileMode.Open, FileAccess.Read, FileShare.ReadWrite | FileShare.Delete);
-            using var doc = JsonDocument.Parse(fs);
-            var root = doc.RootElement;
-            var tradeList = root.TryGetProperty("TradeList", out var tl) && tl.ValueKind == JsonValueKind.Array && tl.GetArrayLength() > 0;
-            var tradeOnCap = root.TryGetProperty("TradeOnCap", out var toc) && toc.ValueKind == JsonValueKind.True;
-            var threshold = root.TryGetProperty("TradeThreshold", out var th) && th.TryGetInt32(out var t) ? t : int.MaxValue;
-            if (tradeList && (tradeOnCap || threshold <= Target))
-                Warnings.Add($"В Auto FATE Grind заполнен список покупок (порог {threshold}). Он может потратить биколоры раньше, чем их заберёт LazyCrafter. Очисти Settings → Gemstones → Shopping list.");
-        }
-        catch
-        {
-            // AFG not installed or the file is busy: not fatal, the loaded check reports a missing plugin.
         }
     }
 
@@ -317,24 +296,24 @@ public sealed class Plugin : IDalamudPlugin
             SetStatus(Phase.Failed, "LazyCrafter не загружен.");
             return;
         }
-        if (Gems >= Target)
-        {
-            SetStatus(Phase.Done, $"Биколоров хватает ({Gems}/{Target}). Запускаю корзину.");
-            Dispatch();
-            return;
-        }
         if (!IsLoaded(AutoFateGrind))
         {
-            SetStatus(Phase.Failed, $"Нужно ещё {Target - Gems} биколоров, но Auto FATE Grind не загружен.");
+            SetStatus(Phase.Failed, "Материалы за биколоры покупает Auto FATE Grind, а он не загружен.");
             return;
         }
 
         Run("/lcraft stop");
 
-        if (Config.SetAfgZone && Zone != null)
+        // LazyCrafter cannot buy from Gemstone Traders, so Auto FATE Grind farms the gemstones and does the purchase
+        // (its own trade hand-off); the cart is dispatched once the materials are in the bags.
+        buyList = Plan.Purchases.Select(x => (x.ItemId, BagCount(x.ItemId) + x.Units)).ToList();
+        buyStartedAt = DateTime.UtcNow;
+        var applyErr = afg.Apply(Config.SetAfgZone && Zone != null ? Zone.Zone.Territory : 0, buyList, Target);
+        if (applyErr != null)
         {
-            var err = afg.Apply(Zone.Zone.Territory);
-            if (err != null) Print($"{err} Фарм пойдёт по зонам, выбранным в Auto FATE Grind.");
+            afg.Restore();
+            SetStatus(Phase.Failed, applyErr);
+            return;
         }
 
         var wait = 0.5;
@@ -357,10 +336,16 @@ public sealed class Plugin : IDalamudPlugin
 
         startAt = DateTime.UtcNow.AddSeconds(wait);
         forcedStop = false;
-        SetStatus(Phase.Preparing, Zone != null
-            ? $"Готовлюсь: зона {Zone.Zone.Name}, нужно {Target} биколоров (есть {Gems})."
-            : $"Готовлюсь: нужно {Target} биколоров (есть {Gems}).");
+        SetStatus(Phase.Preparing, (Zone != null ? $"Готовлюсь: зона {Zone.Zone.Name}, " : "Готовлюсь: ") +
+            $"нужно {Target} биколоров (есть {Gems}), потом Auto FATE Grind купит {string.Join(", ", Plan.Purchases.Select(x => $"{x.Name} x{x.Units}"))}.");
     }
+
+    private List<(uint ItemId, int StopAt)> buyList = new();
+    private DateTime buyStartedAt;
+    private DateTime gemsReachedAt = DateTime.MinValue;
+
+    /// <summary>How many of the gemstone purchases are already in the bags.</summary>
+    private (int Done, int Total) BuyProgress() => (buyList.Count(b => BagCount(b.ItemId) >= b.StopAt), buyList.Count);
 
     internal void Stop()
     {
@@ -386,6 +371,7 @@ public sealed class Plugin : IDalamudPlugin
                 SetStatus(Phase.Failed, "Команда /afg start не сработала.");
                 return;
             }
+            gemsReachedAt = DateTime.MinValue;
             SetStatus(Phase.Farming, $"Фармлю FATE{(Zone != null ? " в " + Zone.Zone.Name : "")}: {Gems}/{Target} биколоров.");
             return;
         }
@@ -393,12 +379,25 @@ public sealed class Plugin : IDalamudPlugin
         Gems = GemCount();
         if (Phase == Phase.Farming)
         {
-            Status = $"Фармлю FATE{(Zone != null ? " в " + Zone.Zone.Name : "")}: {Gems}/{Target} биколоров.";
-            if (Gems < Target) return;
+            var (done, total) = BuyProgress();
+            if (done < total)
+            {
+                if (Gems >= Target && gemsReachedAt == DateTime.MinValue) gemsReachedAt = now;
+                Status = gemsReachedAt != DateTime.MinValue
+                    ? $"Биколоры есть ({Gems}). Auto FATE Grind едет к торговцу и покупает: куплено {done}/{total}."
+                    : $"Фармлю FATE{(Zone != null ? " в " + Zone.Zone.Name : "")}: {Gems}/{Target} биколоров.";
+                if (gemsReachedAt != DateTime.MinValue && now - gemsReachedAt > TimeSpan.FromMinutes(15))
+                {
+                    Run("/afg stop");
+                    afg.Restore();
+                    SetStatus(Phase.Failed, $"Биколоры набраны, но за 15 минут Auto FATE Grind купил только {done}/{total}. Посмотри /afg log.");
+                }
+                return;
+            }
             Run("/afg stop soft");
             stopSentAt = now;
             idleSince = DateTime.MinValue;
-            SetStatus(Phase.Stopping, $"Набрал {Gems}/{Target}. Жду, пока Auto FATE Grind закончит текущий FATE.");
+            SetStatus(Phase.Stopping, $"Всё куплено ({total}/{total}). Жду, пока Auto FATE Grind остановится.");
             return;
         }
 
@@ -420,12 +419,12 @@ public sealed class Plugin : IDalamudPlugin
         afg.Restore();
         if (Config.DispatchAfterFarming)
         {
-            SetStatus(Phase.Done, $"Биколоры есть ({Gems}). Запустил корзину LazyCrafter.");
+            SetStatus(Phase.Done, "Материалы за биколоры куплены. Запустил корзину LazyCrafter.");
             Dispatch();
         }
         else
         {
-            SetStatus(Phase.Done, $"Биколоры есть ({Gems}). Корзину запусти сам.");
+            SetStatus(Phase.Done, "Материалы за биколоры куплены. Корзину запусти сам.");
         }
     }
 
