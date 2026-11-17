@@ -50,7 +50,25 @@ public sealed class Configuration : IPluginConfiguration
     public bool ToggleArtisan { get; set; } = true;
     /// <summary>…and load it again afterwards.</summary>
     public bool ReenableArtisan { get; set; } = true;
+    /// <summary>How each raw material is obtained, chosen on the Materials tab (missing = automatic).</summary>
+    public Dictionary<uint, Route> Routes { get; set; } = new();
 }
+
+/// <summary>How a raw material is obtained.</summary>
+public enum Route
+{
+    /// <summary>Vulcan's crafting queue gathers or fishes it (its auto-gather).</summary>
+    Gather,
+    /// <summary>Gemstone Trader: Auto FATE Grind farms the gemstones, Vulcan buys.</summary>
+    Bicolor,
+    /// <summary>Vulcan's vendor buy list (gil, Grand Company, scrips…).</summary>
+    Vendor,
+    /// <summary>Market board, drops or anything else: left to the player.</summary>
+    Market,
+}
+
+/// <summary>A raw material of the cart with its possible and chosen route.</summary>
+public sealed record Material(uint ItemId, string Name, int Have, int Missing, IReadOnlyList<Route> Options, Route Route, bool Chosen);
 
 [Serializable]
 public sealed class CartEntry
@@ -94,6 +112,8 @@ public sealed class Plugin : IDalamudPlugin
     internal GemPlan Plan { get; private set; } = GemPlan.Empty;
     /// <summary>What Vulcan should buy: gemstone materials and other vendor-only materials of the cart.</summary>
     internal List<VendorBuy> VendorBuys { get; private set; } = new();
+    /// <summary>All raw materials still missing for the cart, with their routes (Materials tab).</summary>
+    internal List<Material> Materials { get; private set; } = new();
     internal Phase Phase { get; private set; } = Phase.Idle;
     internal string Status { get; private set; } = "Ожидание.";
     internal int Target { get; private set; }
@@ -183,7 +203,7 @@ public sealed class Plugin : IDalamudPlugin
     {
         Warnings.Clear();
         Gems = GemCount();
-        Plan = Planner.Build(CartLines(), BagCount);
+        Plan = Planner.Build(CartLines(), BagCount, id => RouteOf(id) == Route.Bicolor);
         Target = (int)Math.Min(Planner.GemCap, Plan.Gems + Math.Max(0, Config.Reserve));
         if (Plan.Gems + Config.Reserve > Planner.GemCap)
             Warnings.Add($"Корзине нужно {Plan.Gems} биколоров, а больше {Planner.GemCap} держать нельзя. Уменьши корзину или запусти её в несколько заходов.");
@@ -192,13 +212,13 @@ public sealed class Plugin : IDalamudPlugin
         if (!gbr) Warnings.Add("GatherBuddy Reborn не загружен: покупки и крафт делает его Vulcan.");
         if (Plan.Gems > Gems && !IsLoaded(AutoFateGrind)) Warnings.Add("Auto FATE Grind не загружен: биколоры фармить некому.");
 
-        // Vendor purchases: everything sold for gemstones, plus materials with no gathering node or fishing spot
-        // that some vendor sells (gil, Grand Company, scrips…).
+        // Routes: gemstone materials go to the gemstone plan above; the rest by the route chosen on the Materials tab.
+        Materials = Plan.Purchases.Select(p => MaterialOf(p.ItemId, p.Units))
+            .Concat(Plan.Leaves.Select(kv => MaterialOf(kv.Key, kv.Value)))
+            .OrderBy(m => m.Route).ThenByDescending(m => m.Missing).ToList();
         VendorBuys = Plan.Purchases.Select(p => new VendorBuy(p.ItemId, p.Name, p.Units, BagCount(p.ItemId) + p.Units, true)).ToList();
-        if (gbr)
-            foreach (var (id, qty) in Plan.Leaves)
-                if (Sources.Of(id) is Source.Vendor or Source.Other && Vulcan.CanBuy(id))
-                    VendorBuys.Add(new VendorBuy(id, Planner.ItemName(id), qty, BagCount(id) + qty, false));
+        foreach (var m in Materials.Where(m => m.Route == Route.Vendor))
+            VendorBuys.Add(new VendorBuy(m.ItemId, m.Name, m.Missing, m.Have + m.Missing, false));
 
         Zone = Config.ZoneOverride != 0 && Zones.Get(Config.ZoneOverride) is { } manual
             ? new ZoneChoice(manual, "выбрана вручную", Array.Empty<(string, int)>())
@@ -208,6 +228,46 @@ public sealed class Plugin : IDalamudPlugin
         if (Config.SwitchJob && Zone != null && Plan.Gems > Gems && Jobs.Pick(Config.Jobs, Zone.Zone.MinLevel) == null)
             Warnings.Add($"Нет включённого класса уровня {Zone.Zone.MinLevel}+ с гирсетом — фарм пойдёт текущим классом.");
     }
+
+    // ---------------------------------------------------------------- routes
+
+    /// <summary>Routes that can work for an item: gather/fish, Gemstone Trader, a vendor Vulcan knows, or by hand.</summary>
+    internal List<Route> RouteOptions(uint itemId)
+    {
+        var options = new List<Route>();
+        var src = Sources.Of(itemId);
+        if (src is Source.Gather or Source.Fish) options.Add(Route.Gather);
+        if (Planner.HasGemOffer(itemId)) options.Add(Route.Bicolor);
+        if (src == Source.Vendor || (!Planner.HasGemOffer(itemId) && IsLoaded(GatherBuddy) && Vulcan.CanBuy(itemId))) options.Add(Route.Vendor);
+        options.Add(Route.Market);
+        return options;
+    }
+
+    /// <summary>The chosen route if it is still possible, otherwise the first of gather → gemstones → vendor → by hand.</summary>
+    internal Route RouteOf(uint itemId)
+    {
+        var options = RouteOptions(itemId);
+        return Config.Routes.TryGetValue(itemId, out var r) && options.Contains(r) ? r : options[0];
+    }
+
+    private Material MaterialOf(uint itemId, int missing) =>
+        new(itemId, Planner.ItemName(itemId), BagCount(itemId), missing, RouteOptions(itemId), RouteOf(itemId), Config.Routes.ContainsKey(itemId));
+
+    internal void SetRoute(uint itemId, Route? route)
+    {
+        if (route is { } r) Config.Routes[itemId] = r;
+        else Config.Routes.Remove(itemId);
+        SaveConfig();
+        Recalculate();
+    }
+
+    internal static string RouteName(Route r) => r switch
+    {
+        Route.Gather => "Сбор",
+        Route.Bicolor => "Биколоры",
+        Route.Vendor => "Вендор",
+        _ => "Рынок / вручную",
+    };
 
     // ---------------------------------------------------------------- cart
 
@@ -318,10 +378,10 @@ public sealed class Plugin : IDalamudPlugin
         var list = new List<string>(Config.ImportManual);
         var bought = VendorBuys.Select(v => v.ItemId).ToHashSet();
 
-        var market = Plan.Leaves.Where(kv => Sources.Of(kv.Key) is Source.Other or Source.Vendor && !bought.Contains(kv.Key))
-                         .OrderByDescending(kv => kv.Value).Select(kv => $"{Planner.ItemName(kv.Key)} x{kv.Value}").ToList();
+        var market = Materials.Where(m => m.Route == Route.Market && !bought.Contains(m.ItemId))
+                              .Select(m => $"{m.Name} x{m.Missing}").ToList();
         if (market.Count > 0)
-            list.Add($"Купить на рынке или добыть самому (ни сбора, ни вендора, которого знает Vulcan): {string.Join(", ", market)}.");
+            list.Add($"Купить на рынке или добыть самому (путь «рынок / вручную» на вкладке «Материалы»): {string.Join(", ", market)}.");
 
         if (Zone?.Sold.Where(s => s.Rank > 1).ToList() is { Count: > 0 } ranked && Plan.Gems > 0)
             list.Add($"Открыть ранг {ranked.Max(s => s.Rank)} общих FATE в {Zone.Zone.Name}: без него торговец не продаст {string.Join(", ", ranked.Select(s => s.Item))}.");

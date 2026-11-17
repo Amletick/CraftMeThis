@@ -41,6 +41,7 @@ public sealed class MainWindow : Window
         {
             if (ImGui.BeginTabItem("  Фарм  ")) { Scroll("farm", DrawFarm); ImGui.EndTabItem(); }
             if (ImGui.BeginTabItem($"  Корзина ({p.Config.Cart.Count})  ")) { Scroll("cart", DrawCart); ImGui.EndTabItem(); }
+            if (ImGui.BeginTabItem($"  Материалы ({p.Materials.Count})  ")) { Scroll("materials", DrawMaterials); ImGui.EndTabItem(); }
             if (ImGui.BeginTabItem("  Классы  ")) { DrawJobs(); ImGui.EndTabItem(); }
             if (ImGui.BeginTabItem("  Настройки  ")) { Scroll("settings", DrawSettings); ImGui.EndTabItem(); }
             ImGui.EndTabBar();
@@ -365,6 +366,87 @@ public sealed class MainWindow : Window
             if (remove != null) { cart.Remove(remove); p.SaveConfig(); p.Recalculate(); }
         }
         Ui.EndCard();
+    }
+
+    // ---------------------------------------------------------------- materials
+
+    private static readonly (Route Route, string Title, FontAwesomeIcon Icon)[] RouteGroups =
+    {
+        (Route.Gather, "Сбор и рыбалка — Vulcan соберёт во время крафта", FontAwesomeIcon.Leaf),
+        (Route.Bicolor, "Биколоры — нафармит AFG, купит Vulcan у Gemstone Trader", FontAwesomeIcon.Gem),
+        (Route.Vendor, "Вендор — купит Vulcan (гил, GC, скрипы…)", FontAwesomeIcon.Store),
+        (Route.Market, "Рынок / вручную — сделать самому", FontAwesomeIcon.HandPaper),
+    };
+
+    private static Vector4 RouteColor(Route r) => r switch
+    {
+        Route.Gather => Ui.Good,
+        Route.Bicolor => Ui.Gem,
+        Route.Vendor => Ui.Accent,
+        _ => Ui.Warn,
+    };
+
+    private void DrawMaterials()
+    {
+        if (p.Config.Cart.Count == 0)
+        {
+            ImGui.TextColored(Ui.Muted, "Корзина пуста — импортируй список на вкладке «Корзина».");
+            return;
+        }
+        ImGui.TextColored(Ui.Muted, "Сырьё, которого не хватает на всю корзину (с учётом сумки). Путь можно сменить у каждого материала; «авто» — сбор → биколоры → вендор → вручную.");
+        if (p.Materials.Count == 0)
+        {
+            ImGui.TextColored(Ui.Good, "Всё сырьё уже в сумке.");
+            return;
+        }
+        if (Ui.IconButton(FontAwesomeIcon.Undo, "Сбросить выбор на авто")) { p.Config.Routes.Clear(); p.SaveConfig(); p.Recalculate(); }
+        ImGui.SameLine();
+        ImGui.TextColored(Ui.Gem, $"биколоров нужно: {p.Plan.Gems}");
+
+        foreach (var (route, title, icon) in RouteGroups)
+        {
+            var rows = p.Materials.Where(m => m.Route == route).ToList();
+            if (rows.Count == 0) continue;
+            ImGui.Spacing();
+            Ui.BeginCard($"mat-{route}");
+            Ui.Icon(icon, RouteColor(route));
+            ImGui.SameLine();
+            ImGui.TextColored(RouteColor(route), $"{title}  ·  {rows.Count}");
+            if (ImGui.BeginTable($"mat-t-{route}", 4, ImGuiTableFlags.RowBg | ImGuiTableFlags.PadOuterX))
+            {
+                ImGui.TableSetupColumn("Материал", ImGuiTableColumnFlags.WidthStretch);
+                ImGui.TableSetupColumn("Есть", ImGuiTableColumnFlags.WidthFixed, 50);
+                ImGui.TableSetupColumn("Не хватает", ImGuiTableColumnFlags.WidthFixed, 80);
+                ImGui.TableSetupColumn("Путь", ImGuiTableColumnFlags.WidthFixed, 160);
+                ImGui.TableHeadersRow();
+                foreach (var m in rows)
+                {
+                    ImGui.PushID((int)m.ItemId);
+                    ImGui.TableNextRow();
+                    ImGui.TableNextColumn();
+                    Ui.GameIcon(p.Planner.ItemIcon(m.ItemId), RowIcon);
+                    ImGui.SameLine();
+                    Ui.CenteredText(m.Name, RowIcon);
+                    ImGui.TableNextColumn(); Ui.CenteredText(m.Have.ToString(), RowIcon, m.Have > 0 ? Ui.Text : Ui.Muted);
+                    ImGui.TableNextColumn(); Ui.CenteredText(m.Missing.ToString(), RowIcon);
+                    ImGui.TableNextColumn();
+                    ImGui.SetCursorPosY(ImGui.GetCursorPosY() + (RowIcon - ImGui.GetFrameHeight()) / 2);
+                    ImGui.SetNextItemWidth(-1);
+                    var preview = Plugin.RouteName(m.Route) + (m.Chosen ? "" : " (авто)");
+                    if (ImGui.BeginCombo("##route", preview))
+                    {
+                        if (ImGui.Selectable("авто", !m.Chosen)) p.SetRoute(m.ItemId, null);
+                        foreach (var o in m.Options)
+                            if (ImGui.Selectable(Plugin.RouteName(o), m.Chosen && m.Route == o)) p.SetRoute(m.ItemId, o);
+                        ImGui.EndCombo();
+                    }
+                    if (m.Options.Count == 1 && ImGui.IsItemHovered()) ImGui.SetTooltip("Других путей нет: ни сбора, ни Gemstone Trader, ни вендора, которого знает Vulcan.");
+                    ImGui.PopID();
+                }
+                ImGui.EndTable();
+            }
+            Ui.EndCard();
+        }
     }
 
     // ---------------------------------------------------------------- jobs

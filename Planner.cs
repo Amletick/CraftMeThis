@@ -128,8 +128,14 @@ public sealed class Planner
     public string RecipeName(uint recipeId) =>
         recipes.TryGetRow(recipeId, out var r) ? ItemName(r.ItemResult.RowId) : $"recipe #{recipeId}";
 
+    public bool HasGemOffer(uint itemId) => gemOffers.ContainsKey(itemId);
+
+    public bool HasRecipe(uint itemId) => recipeByItem.ContainsKey(itemId);
+
     /// <param name="bagCount">How many of an item are in the bags right now (NQ + HQ).</param>
-    public GemPlan Build(IEnumerable<CartLine> cart, Func<uint, int> bagCount)
+    /// <param name="buyForGems">Whether a raw material that a Gemstone Trader sells should be bought for gemstones
+    /// (default: always). When false it goes to <see cref="GemPlan.Leaves"/> like any other raw material.</param>
+    public GemPlan Build(IEnumerable<CartLine> cart, Func<uint, int> bagCount, Func<uint, bool>? buyForGems = null)
     {
         var available = new Dictionary<uint, int>();
         int Avail(uint id)
@@ -156,7 +162,7 @@ public sealed class Planner
                 Craft(r, crafts, depth + 1);
                 return;
             }
-            if (gemOffers.ContainsKey(id))
+            if (gemOffers.ContainsKey(id) && (buyForGems?.Invoke(id) ?? true))
                 needUnits[id] = needUnits.GetValueOrDefault(id) + qty;
             else if (id > 19)
                 leaves[id] = leaves.GetValueOrDefault(id) + qty;
