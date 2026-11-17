@@ -55,13 +55,15 @@ Teamcraft amounts are items, so they are converted to crafts using the recipe yi
 In `/xlsettings` → Experimental → Custom Plugin Repositories, add:
 
 ```
-https://raw.githubusercontent.com/Amletick/CraftMeThis/main/repo.json
+https://github.com/Amletick/CraftMeThis/releases/latest/download/repo.json
 ```
 
-## Build
+## Release
 
 ```
-dotnet build -c Release
+python publish.py 0.5.1
 ```
 
-The output is `bin/Release/CraftMeThis/latest.zip`. Copy it to `dist/latest.zip` and bump `AssemblyVersion` in `repo.json`.
+This builds the plugin, bumps the version, pushes to GitHub and creates a GitHub release with `latest.zip` and `repo.json`.
+The `releases/latest/download/...` link is not cached, so Dalamud sees the new version immediately
+(raw.githubusercontent.com caches for about five minutes).
