@@ -20,8 +20,8 @@
     "IsHide": false,
     "IsTestingExclusive": false,
     "DownloadCount": 0,
-    "DownloadLinkInstall": "https://raw.githubusercontent.com/Amletick/CraftMeThis/main/dist/latest.zip",
-    "DownloadLinkUpdate": "https://raw.githubusercontent.com/Amletick/CraftMeThis/main/dist/latest.zip",
-    "DownloadLinkTesting": "https://raw.githubusercontent.com/Amletick/CraftMeThis/main/dist/latest.zip"
+    "DownloadLinkInstall": "https://github.com/Amletick/CraftMeThis/releases/download/v0.5.0/latest.zip",
+    "DownloadLinkUpdate": "https://github.com/Amletick/CraftMeThis/releases/download/v0.5.0/latest.zip",
+    "DownloadLinkTesting": "https://github.com/Amletick/CraftMeThis/releases/download/v0.5.0/latest.zip"
   }
 ]
