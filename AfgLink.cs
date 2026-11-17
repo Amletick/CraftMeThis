@@ -14,7 +14,7 @@ namespace CraftMeThis;
 ///  * TradeList / TradeOnCap / TradeThreshold / SpendMode / KeepGemstonesReserve / AfterTrade — AFG's own
 ///    "buy from the Gemstone Trader" hand-off: once the wallet reaches the threshold it travels to the trader,
 ///    buys each listed item up to its StopAtCount and, with AfterTrade = Stop, ends the run.
-///    LazyCrafter cannot do this purchase itself: it does not know Gemstone Traders (FateShop NPCs) at all.
+///    Used only when asked to buy; CraftMeThis now farms with AFG and lets Vulcan buy.
 /// </summary>
 public sealed class AfgLink
 {
@@ -50,7 +50,12 @@ public sealed class AfgLink
             Set(cfg, "LevelRangeFilterEnabled", false);
             Set(cfg, "LevelWindowEnabled", false);
 
-            if (purchases.Count > 0)
+            if (purchases.Count == 0)
+            {
+                // Farming only: AFG must not spend the gemstones on its own shopping list.
+                Set(cfg, "TradeOnCap", false);
+            }
+            else
             {
                 if (Get(cfg, "TradeList") is not IList list) return "У Auto FATE Grind нет TradeList — возможно, изменилась его версия.";
                 var entryType = list.GetType().GetGenericArguments()[0];
@@ -149,7 +154,7 @@ public sealed class AfgLink
         error = null;
         try
         {
-            var instance = LazyCrafterLink.FindPluginInstance("AutoFateGrind");
+            var instance = PluginFinder.FindPluginInstance("AutoFateGrind");
             if (instance == null) { error = "Auto FATE Grind не загружен."; return null; }
             var cfg = instance.GetType().GetProperty("Cfg", Any)?.GetValue(null);
             if (cfg == null) error = "У Auto FATE Grind не нашёл настроек (Plugin.Cfg) — возможно, изменилась его версия.";

@@ -95,7 +95,7 @@ public static class Teamcraft
 
     /// <summary>
     /// A Teamcraft list document → cart. Final items with a normal recipe are crafted as they are. Free Company workshop
-    /// items (recipe id "fc…") are built in the workshop phase by phase, which LazyCrafter/Artisan cannot do, so their
+    /// items (recipe id "fc…") are built in the workshop phase by phase, which a crafting queue cannot do, so their
     /// craftable components go into the cart instead; their raw materials are listed as skipped.
     /// </summary>
     public static ImportResult FromListJson(string json, Planner planner, out string listName)
@@ -246,7 +246,7 @@ public static class Teamcraft
                 skipped.Add($"{name} — не нашёл такой предмет");
                 continue;
             }
-            // Without a "Final items" section only take what can be crafted: raw materials are LazyCrafter's job.
+            // Without a "Final items" section only take what can be crafted: raw materials are gathered or bought during the run.
             if (finalStart < 0 && planner.ResolveRecipe(id, null) == null) continue;
             result.Add(new ImportedItem(id, null, qty));
         }

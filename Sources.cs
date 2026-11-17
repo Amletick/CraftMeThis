@@ -7,9 +7,9 @@ namespace CraftMeThis;
 public enum Source { Gather, Fish, Vendor, Other }
 
 /// <summary>
-/// Where a raw material comes from, as far as LazyCrafter can get it on its own: gathering (GatherBuddy), fishing,
-/// or a gil vendor (Knightshopper). Anything else (drops, market-only items) ends up on the market-board list,
-/// which LazyCrafter leaves to the player.
+/// Where a raw material comes from, as far as Vulcan can get it on its own: gathering (GatherBuddy), fishing,
+/// or a gil vendor. Anything else (GC, scrips, drops, market-only items) is checked against Vulcan's vendor data,
+/// and what no vendor sells is left to the player.
 /// </summary>
 public sealed class Sources
 {

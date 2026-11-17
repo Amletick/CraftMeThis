@@ -6,7 +6,7 @@ using Lumina.Excel.Sheets;
 
 namespace CraftMeThis;
 
-/// <summary>One cart line as LazyCrafter stores it: a Recipe row and how many times to craft it.</summary>
+/// <summary>One cart line: a Recipe row and how many times to craft it.</summary>
 public readonly record struct CartLine(uint RecipeId, int Crafts);
 
 /// <summary>A material that the cart needs and that a Gemstone Trader sells for Bicolor Gemstones.</summary>
@@ -23,9 +23,9 @@ public sealed record GemPlan(IReadOnlyList<GemPurchase> Purchases, IReadOnlyList
 }
 
 /// <summary>
-/// Walks the recipe tree of a cart the same way LazyCrafter does: what is already in the bags is used first,
+/// Walks the recipe tree of a cart the same way Vulcan plans it: what is already in the bags is used first,
 /// a material that has a recipe is crafted, and a material without a recipe that a Gemstone Trader sells is bought
-/// for Bicolor Gemstones. Everything else (gathering, vendors, crystals) is LazyCrafter's business and is ignored.
+/// for Bicolor Gemstones. Everything else (gathering, vendors, crystals) is collected in Leaves for the vendor/manual split.
 /// </summary>
 public sealed class Planner
 {

@@ -1,8 +1,6 @@
 using System;
 using System.Collections.Generic;
-using System.IO;
 using System.Linq;
-using System.Text.Json;
 using System.Threading.Tasks;
 using Dalamud.Configuration;
 using Dalamud.Game;
@@ -21,16 +19,14 @@ namespace CraftMeThis;
 [Serializable]
 public sealed class Configuration : IPluginConfiguration
 {
-    public int Version { get; set; } = 1;
+    public int Version { get; set; } = 2;
     /// <summary>Extra gemstones to farm on top of what the cart costs.</summary>
     public int Reserve { get; set; }
-    /// <summary>Start the LazyCrafter cart once enough gemstones are farmed.</summary>
-    public bool DispatchAfterFarming { get; set; } = true;
-    /// <summary>Seconds the character must stay idle after "/afg stop soft" before LazyCrafter is started.</summary>
+    /// <summary>Seconds the character must stay idle after "/afg stop soft" before the vendor run starts.</summary>
     public int IdleSeconds { get; set; } = 6;
     /// <summary>Minutes to wait for the soft stop before forcing "/afg stop".</summary>
     public int SoftStopTimeoutMinutes { get; set; } = 8;
-    /// <summary>The plugin's own cart (imported from Teamcraft or edited here), sent to LazyCrafter on demand.</summary>
+    /// <summary>The cart: recipes and craft counts (imported from Teamcraft or edited here).</summary>
     public List<CartEntry> Cart { get; set; } = new();
     /// <summary>Farm zone (territory id) chosen by hand; 0 = pick automatically from the cart.</summary>
     public uint ZoneOverride { get; set; }
@@ -44,6 +40,16 @@ public sealed class Configuration : IPluginConfiguration
     public string TeamcraftListUrl { get; set; } = string.Empty;
     /// <summary>Things the plugin will not do for the imported list (FC workshop phases, workshop raw materials).</summary>
     public List<string> ImportManual { get; set; } = new();
+    /// <summary>Buy vendor materials (gil, GC, gemstones…) through Vulcan before crafting.</summary>
+    public bool BuyFromVendors { get; set; } = true;
+    /// <summary>Start Vulcan's gather + craft queue after the purchases.</summary>
+    public bool CraftAfterBuying { get; set; } = true;
+    /// <summary>Let Vulcan take materials from retainers (its "Retainer restock", needs Allagan Tools).</summary>
+    public bool UseRetainers { get; set; } = true;
+    /// <summary>Unload Artisan for Vulcan's crafting (Vulcan refuses to craft while it is loaded)…</summary>
+    public bool ToggleArtisan { get; set; } = true;
+    /// <summary>…and load it again afterwards.</summary>
+    public bool ReenableArtisan { get; set; } = true;
 }
 
 [Serializable]
@@ -53,7 +59,10 @@ public sealed class CartEntry
     public int Crafts { get; set; }
 }
 
-public enum Phase { Idle, Preparing, Farming, Stopping, Done, Failed }
+public enum Phase { Idle, Preparing, Farming, Stopping, Buying, Crafting, Done, Failed }
+
+/// <summary>A material Vulcan will buy from a vendor: target is the bag count to reach.</summary>
+public sealed record VendorBuy(uint ItemId, string Name, int Units, int Target, bool ForGemstones);
 
 public sealed class Plugin : IDalamudPlugin
 {
@@ -69,7 +78,7 @@ public sealed class Plugin : IDalamudPlugin
 
     private const string Cmd = "/craftme";
     private const string CmdShort = "/cmt";
-    private const string LazyCrafter = "LazyCrafter";
+    private const string GatherBuddy = "GatherBuddyReborn";
     private const string AutoFateGrind = "AutoFateGrind";
 
     internal readonly Configuration Config;
@@ -77,11 +86,14 @@ public sealed class Plugin : IDalamudPlugin
     internal readonly Zones Zones;
     internal readonly Jobs Jobs;
     internal readonly Sources Sources;
+    internal readonly VulcanLink Vulcan = new();
     private readonly AfgLink afg = new();
     private readonly WindowSystem windows = new("CraftMeThis");
     private readonly MainWindow window;
 
     internal GemPlan Plan { get; private set; } = GemPlan.Empty;
+    /// <summary>What Vulcan should buy: gemstone materials and other vendor-only materials of the cart.</summary>
+    internal List<VendorBuy> VendorBuys { get; private set; } = new();
     internal Phase Phase { get; private set; } = Phase.Idle;
     internal string Status { get; private set; } = "Ожидание.";
     internal int Target { get; private set; }
@@ -89,13 +101,20 @@ public sealed class Plugin : IDalamudPlugin
     internal List<string> Warnings { get; } = new();
     internal ZoneChoice? Zone { get; private set; }
 
-    internal bool Running => Phase is Phase.Preparing or Phase.Farming or Phase.Stopping;
-    private DateTime startAt;
+    internal bool Running => Phase is Phase.Preparing or Phase.Farming or Phase.Stopping or Phase.Buying or Phase.Crafting;
+    private bool Farming => Phase is Phase.Preparing or Phase.Farming or Phase.Stopping;
 
     private DateTime nextTick = DateTime.MinValue;
+    private DateTime startAt;
     private DateTime stopSentAt;
     private DateTime idleSince = DateTime.MinValue;
     private bool forcedStop;
+
+    // Buying / crafting sub-state.
+    private bool vendorStarted;
+    private DateTime phaseStartedAt;
+    private bool artisanTurnedOff;
+    private bool craftStarted;
 
     public Plugin()
     {
@@ -116,7 +135,7 @@ public sealed class Plugin : IDalamudPlugin
 
         Commands.AddHandler(Cmd, new CommandInfo(OnCommand)
         {
-            HelpMessage = "окно; /craftme plan — посчитать биколоры по корзине LazyCrafter; /craftme start — нафармить и запустить корзину; /craftme stop — остановить",
+            HelpMessage = "окно; /craftme plan — что нужно корзине; /craftme start — нафармить биколоры, закупить и скрафтить; /craftme stop — остановить",
         });
         Commands.AddHandler(CmdShort, new CommandInfo(OnCommand) { HelpMessage = "то же, что /craftme" });
         Framework.Update += OnUpdate;
@@ -128,6 +147,7 @@ public sealed class Plugin : IDalamudPlugin
         Commands.RemoveHandler(Cmd);
         Commands.RemoveHandler(CmdShort);
         afg.Restore();
+        if (artisanTurnedOff && Config.ReenableArtisan) Vulcan.SetArtisan(true);
         Pi.UiBuilder.Draw -= windows.Draw;
         Pi.UiBuilder.OpenMainUi -= OpenWindow;
         Pi.UiBuilder.OpenConfigUi -= OpenWindow;
@@ -146,11 +166,10 @@ public sealed class Plugin : IDalamudPlugin
             case "stop": Stop(); break;
             case "plan":
                 Recalculate();
-                Print(Plan.Purchases.Count == 0
-                    ? "в корзине LazyCrafter нет материалов за биколоры."
-                    : $"корзине нужно {Plan.Gems} биколоров, у тебя {Gems}: " +
-                      string.Join(", ", Plan.Purchases.Select(p => $"{p.Name} x{p.Units} ({p.Gems})")) +
-                      (Zone != null ? $". Зона фарма: {Zone.Zone.Name}." : ""));
+                Print(Config.Cart.Count == 0 ? "корзина пуста."
+                    : $"биколоров нужно {Plan.Gems} (есть {Gems}); у вендоров купить: " +
+                      (VendorBuys.Count == 0 ? "ничего" : string.Join(", ", VendorBuys.Select(v => $"{v.Name} x{v.Units}"))) +
+                      (Zone != null && Plan.Gems > 0 ? $". Зона фарма: {Zone.Zone.Name}." : "."));
                 break;
             default: window.IsOpen = !window.IsOpen; break;
         }
@@ -158,59 +177,41 @@ public sealed class Plugin : IDalamudPlugin
 
     // ---------------------------------------------------------------- plan
 
+    internal IReadOnlyList<CartLine> CartLines() => Config.Cart.Select(c => new CartLine(c.RecipeId, c.Crafts)).ToList();
+
     internal void Recalculate()
     {
         Warnings.Clear();
         Gems = GemCount();
-        var cart = ReadCart(out var cartError);
-        if (cartError != null) Warnings.Add(cartError);
-        Plan = Planner.Build(cart, BagCount);
+        Plan = Planner.Build(CartLines(), BagCount);
         Target = (int)Math.Min(Planner.GemCap, Plan.Gems + Math.Max(0, Config.Reserve));
         if (Plan.Gems + Config.Reserve > Planner.GemCap)
             Warnings.Add($"Корзине нужно {Plan.Gems} биколоров, а больше {Planner.GemCap} держать нельзя. Уменьши корзину или запусти её в несколько заходов.");
 
-        if (!IsLoaded(LazyCrafter)) Warnings.Add("LazyCrafter не загружен.");
-        if (!IsLoaded(AutoFateGrind)) Warnings.Add("Auto FATE Grind не загружен.");
+        var gbr = IsLoaded(GatherBuddy);
+        if (!gbr) Warnings.Add("GatherBuddy Reborn не загружен: покупки и крафт делает его Vulcan.");
+        if (Plan.Gems > Gems && !IsLoaded(AutoFateGrind)) Warnings.Add("Auto FATE Grind не загружен: биколоры фармить некому.");
+
+        // Vendor purchases: everything sold for gemstones, plus materials with no gathering node or fishing spot
+        // that some vendor sells (gil, Grand Company, scrips…).
+        VendorBuys = Plan.Purchases.Select(p => new VendorBuy(p.ItemId, p.Name, p.Units, BagCount(p.ItemId) + p.Units, true)).ToList();
+        if (gbr)
+            foreach (var (id, qty) in Plan.Leaves)
+                if (Sources.Of(id) is Source.Vendor or Source.Other && Vulcan.CanBuy(id))
+                    VendorBuys.Add(new VendorBuy(id, Planner.ItemName(id), qty, BagCount(id) + qty, false));
 
         Zone = Config.ZoneOverride != 0 && Zones.Get(Config.ZoneOverride) is { } manual
             ? new ZoneChoice(manual, "выбрана вручную", Array.Empty<(string, int)>())
             : Zones.Choose(Plan);
         if (Zone?.Sold.Any(s => s.Rank > 1) == true)
             Warnings.Add($"Часть материалов у торговца {Zone.Zone.Trader} открывается только с ранга {Zone.Sold.Max(s => s.Rank)} общих FATE в {Zone.Zone.Name}.");
-        if (Config.SwitchJob && Zone != null && Plan.Purchases.Count > 0 && Jobs.Pick(Config.Jobs, Zone.Zone.MinLevel) == null)
+        if (Config.SwitchJob && Zone != null && Plan.Gems > Gems && Jobs.Pick(Config.Jobs, Zone.Zone.MinLevel) == null)
             Warnings.Add($"Нет включённого класса уровня {Zone.Zone.MinLevel}+ с гирсетом — фарм пойдёт текущим классом.");
     }
 
-    private List<CartLine> ReadCart(out string? error)
-    {
-        error = null;
-        var path = Path.Combine(Pi.ConfigDirectory.Parent!.FullName, LazyCrafter + ".json");
-        try
-        {
-            using var fs = new FileStream(path, FileMode.Open, FileAccess.Read, FileShare.ReadWrite | FileShare.Delete);
-            using var doc = JsonDocument.Parse(fs);
-            var lines = new List<CartLine>();
-            if (doc.RootElement.TryGetProperty("Cart", out var cart) && cart.ValueKind == JsonValueKind.Array)
-            {
-                foreach (var e in cart.EnumerateArray())
-                {
-                    if (e.TryGetProperty("RecipeId", out var r) && e.TryGetProperty("Crafts", out var c))
-                        lines.Add(new CartLine(r.GetUInt32(), c.GetInt32()));
-                }
-            }
-            if (lines.Count == 0) error = "Корзина LazyCrafter пуста. Добавь рецепт в Catalog → Add to cart.";
-            return lines;
-        }
-        catch (Exception ex)
-        {
-            error = $"Не удалось прочитать корзину LazyCrafter ({path}): {ex.Message}";
-            return new List<CartLine>();
-        }
-    }
+    // ---------------------------------------------------------------- cart
 
-    // ---------------------------------------------------------------- own cart
-
-    /// <summary>Last import/send result shown on the Cart tab; set from the framework thread.</summary>
+    /// <summary>Last import result shown on the Cart tab; set from the framework thread.</summary>
     internal string CartMessage { get; set; } = string.Empty;
     internal bool ImportBusy { get; private set; }
 
@@ -263,6 +264,7 @@ public sealed class Plugin : IDalamudPlugin
         foreach (var l in res.Lines) AddToCart(l.RecipeId, l.Crafts, save: false);
         foreach (var m in res.Manual) if (!Config.ImportManual.Contains(m)) Config.ImportManual.Add(m);
         SaveConfig();
+        Recalculate();
         var msg = $"Импортировано рецептов: {res.Lines.Count}.";
         if (res.Skipped.Count > 0) msg += " Заметки: " + string.Join("; ", res.Skipped.Take(8)) + (res.Skipped.Count > 8 ? " …" : "");
         return msg;
@@ -277,17 +279,56 @@ public sealed class Plugin : IDalamudPlugin
         if (save) SaveConfig();
     }
 
-    /// <summary>Plan for the plugin's own cart, without touching LazyCrafter.</summary>
-    internal GemPlan OwnCartPlan() => Planner.Build(Config.Cart.Select(c => new CartLine(c.RecipeId, c.Crafts)), BagCount);
-
-    internal string SendToLazyCrafter(bool replace)
+    internal void ClearCart()
     {
-        if (Config.Cart.Count == 0) return "Корзина пуста.";
-        if (Running) return "Сначала останови фарм.";
-        var err = LazyCrafterLink.SetCart(Config.Cart.Select(c => new CartLine(c.RecipeId, c.Crafts)).ToList(), replace);
-        if (err != null) return err;
+        Config.Cart.Clear();
+        Config.ImportManual.Clear();
+        Config.TeamcraftListUrl = string.Empty;
+        SaveConfig();
         Recalculate();
-        return replace ? "Корзина LazyCrafter заменена." : "Добавлено в корзину LazyCrafter.";
+    }
+
+    /// <summary>The imported Teamcraft list, or a Teamcraft import link for the cart; null when there is nothing.</summary>
+    internal string? TeamcraftLink() =>
+        Config.TeamcraftListUrl.Length > 0 ? Config.TeamcraftListUrl
+        : Config.Cart.Count > 0 ? Teamcraft.ImportLink(CartLines(), Planner)
+        : null;
+
+    internal void OpenTeamcraft()
+    {
+        if (TeamcraftLink() is { } url) Dalamud.Utility.Util.OpenLink(url);
+        else Print("корзина пуста — нечего открывать в Teamcraft.");
+    }
+
+    internal void OpenVulcan()
+    {
+        if (!IsLoaded(GatherBuddy)) Print("GatherBuddy Reborn не загружен.");
+        else Run("/vulcan");
+    }
+
+    internal void OpenFateGrind()
+    {
+        if (!IsLoaded(AutoFateGrind)) Print("Auto FATE Grind не загружен.");
+        else Run("/afg");
+    }
+
+    /// <summary>What CraftMeThis (with Vulcan and Auto FATE Grind) will not do on its own for the cart.</summary>
+    internal List<string> ManualTasks()
+    {
+        var list = new List<string>(Config.ImportManual);
+        var bought = VendorBuys.Select(v => v.ItemId).ToHashSet();
+
+        var market = Plan.Leaves.Where(kv => Sources.Of(kv.Key) is Source.Other or Source.Vendor && !bought.Contains(kv.Key))
+                         .OrderByDescending(kv => kv.Value).Select(kv => $"{Planner.ItemName(kv.Key)} x{kv.Value}").ToList();
+        if (market.Count > 0)
+            list.Add($"Купить на рынке или добыть самому (ни сбора, ни вендора, которого знает Vulcan): {string.Join(", ", market)}.");
+
+        if (Zone?.Sold.Where(s => s.Rank > 1).ToList() is { Count: > 0 } ranked && Plan.Gems > 0)
+            list.Add($"Открыть ранг {ranked.Max(s => s.Rank)} общих FATE в {Zone.Zone.Name}: без него торговец не продаст {string.Join(", ", ranked.Select(s => s.Item))}.");
+
+        if (Plan.Gems + Config.Reserve > Planner.GemCap)
+            list.Add($"Корзине нужно {Plan.Gems} биколоров, а больше {Planner.GemCap} не носить: разбей корзину на части.");
+        return list;
     }
 
     // ---------------------------------------------------------------- run
@@ -300,30 +341,29 @@ public sealed class Plugin : IDalamudPlugin
             return;
         }
         Recalculate();
-        if (Plan.Purchases.Count == 0)
+        if (Config.Cart.Count == 0)
         {
-            SetStatus(Phase.Idle, "В корзине нет материалов за биколоры. Запускаю LazyCrafter как есть.");
-            Dispatch();
+            SetStatus(Phase.Idle, "Корзина пуста: импортируй список на вкладке «Корзина».");
             return;
         }
-        if (!IsLoaded(LazyCrafter))
+        if (!IsLoaded(GatherBuddy))
         {
-            SetStatus(Phase.Failed, "LazyCrafter не загружен.");
+            SetStatus(Phase.Failed, "GatherBuddy Reborn не загружен: покупки и крафт делает его Vulcan.");
+            return;
+        }
+        if (Plan.Gems == 0 || Gems >= Target || !Config.BuyFromVendors)
+        {
+            EnterBuying();
             return;
         }
         if (!IsLoaded(AutoFateGrind))
         {
-            SetStatus(Phase.Failed, "Материалы за биколоры покупает Auto FATE Grind, а он не загружен.");
+            SetStatus(Phase.Failed, $"Нужно ещё {Target - Gems} биколоров, а Auto FATE Grind не загружен.");
             return;
         }
 
-        Run("/lcraft stop");
-
-        // LazyCrafter cannot buy from Gemstone Traders, so Auto FATE Grind farms the gemstones and does the purchase
-        // (its own trade hand-off); the cart is dispatched once the materials are in the bags.
-        buyList = Plan.Purchases.Select(x => (x.ItemId, BagCount(x.ItemId) + x.Units)).ToList();
-        buyStartedAt = DateTime.UtcNow;
-        var applyErr = afg.Apply(Config.SetAfgZone && Zone != null ? Zone.Zone.Territory : 0, buyList, Target);
+        // Auto FATE Grind only farms; Vulcan buys from the Gemstone Trader afterwards.
+        var applyErr = afg.Apply(Config.SetAfgZone && Zone != null ? Zone.Zone.Territory : 0, Array.Empty<(uint, int)>(), Target);
         if (applyErr != null)
         {
             afg.Restore();
@@ -351,22 +391,79 @@ public sealed class Plugin : IDalamudPlugin
 
         startAt = DateTime.UtcNow.AddSeconds(wait);
         forcedStop = false;
-        SetStatus(Phase.Preparing, (Zone != null ? $"Готовлюсь: зона {Zone.Zone.Name}, " : "Готовлюсь: ") +
-            $"нужно {Target} биколоров (есть {Gems}), потом Auto FATE Grind купит {string.Join(", ", Plan.Purchases.Select(x => $"{x.Name} x{x.Units}"))}.");
+        SetStatus(Phase.Preparing, (Zone != null ? $"Готовлюсь: зона {Zone.Zone.Name}, " : "Готовлюсь: ") + $"нужно {Target} биколоров (есть {Gems}).");
     }
-
-    private List<(uint ItemId, int StopAt)> buyList = new();
-    private DateTime buyStartedAt;
-    private DateTime gemsReachedAt = DateTime.MinValue;
-
-    /// <summary>How many of the gemstone purchases are already in the bags.</summary>
-    private (int Done, int Total) BuyProgress() => (buyList.Count(b => BagCount(b.ItemId) >= b.StopAt), buyList.Count);
 
     internal void Stop()
     {
-        if (Running) Run("/afg stop");
+        if (Farming) Run("/afg stop");
+        if (Phase == Phase.Buying) Vulcan.StopVendor();
+        if (Phase == Phase.Crafting) Vulcan.StopCrafting();
         afg.Restore();
+        RestoreArtisan();
         SetStatus(Phase.Idle, "Остановлено вручную.");
+    }
+
+    private void EnterBuying()
+    {
+        Recalculate();
+        if (!Config.BuyFromVendors || VendorBuys.Count == 0)
+        {
+            EnterCrafting();
+            return;
+        }
+        var accepted = Vulcan.SetVendorList(VendorBuys.Select(v => (v.ItemId, v.Target)).ToList(), out var err);
+        if (err != null)
+        {
+            SetStatus(Phase.Failed, err);
+            return;
+        }
+        var refused = VendorBuys.Where(v => !accepted.Contains(v.ItemId)).Select(v => v.Name).ToList();
+        if (refused.Count > 0) Print($"Vulcan не нашёл вендора для: {string.Join(", ", refused)}.");
+        if (accepted.Count == 0)
+        {
+            EnterCrafting();
+            return;
+        }
+        vendorStarted = false;
+        phaseStartedAt = DateTime.UtcNow;
+        SetStatus(Phase.Buying, $"Vulcan закупает у вендоров: {string.Join(", ", VendorBuys.Where(v => accepted.Contains(v.ItemId)).Select(v => $"{v.Name} x{v.Units}"))}.");
+    }
+
+    private void EnterCrafting()
+    {
+        if (!Config.CraftAfterBuying)
+        {
+            SetStatus(Phase.Done, "Покупки готовы. Крафт выключен в настройках — запусти его в Vulcan сам.");
+            return;
+        }
+        craftStarted = false;
+        phaseStartedAt = DateTime.UtcNow;
+        if (VulcanLink.ArtisanLoaded)
+        {
+            if (!Config.ToggleArtisan)
+            {
+                SetStatus(Phase.Failed, "Vulcan не крафтит при загруженном Artisan. Выключи Artisan или включи «выключать Artisan» в настройках.");
+                return;
+            }
+            var err = Vulcan.SetArtisan(false);
+            if (err != null)
+            {
+                SetStatus(Phase.Failed, err);
+                return;
+            }
+            artisanTurnedOff = true;
+            SetStatus(Phase.Crafting, "Выключаю Artisan для крафта в Vulcan…");
+            return;
+        }
+        SetStatus(Phase.Crafting, "Запускаю крафт в Vulcan…");
+    }
+
+    private void RestoreArtisan()
+    {
+        if (!artisanTurnedOff) return;
+        artisanTurnedOff = false;
+        if (Config.ReenableArtisan && Vulcan.SetArtisan(true) is { } err) Print(err);
     }
 
     private void OnUpdate(IFramework _)
@@ -377,46 +474,41 @@ public sealed class Plugin : IDalamudPlugin
         nextTick = now.AddSeconds(1);
         if (!ClientState.IsLoggedIn) return;
 
-        if (Phase == Phase.Preparing)
+        switch (Phase)
         {
-            if (now < startAt) return;
-            if (!Run("/afg start"))
-            {
-                afg.Restore();
-                SetStatus(Phase.Failed, "Команда /afg start не сработала.");
-                return;
-            }
-            gemsReachedAt = DateTime.MinValue;
-            SetStatus(Phase.Farming, $"Фармлю FATE{(Zone != null ? " в " + Zone.Zone.Name : "")}: {Gems}/{Target} биколоров.");
+            case Phase.Preparing: TickPreparing(now); break;
+            case Phase.Farming: TickFarming(now); break;
+            case Phase.Stopping: TickStopping(now); break;
+            case Phase.Buying: TickBuying(now); break;
+            case Phase.Crafting: TickCrafting(now); break;
+        }
+    }
+
+    private void TickPreparing(DateTime now)
+    {
+        if (now < startAt) return;
+        if (!Run("/afg start"))
+        {
+            afg.Restore();
+            SetStatus(Phase.Failed, "Команда /afg start не сработала.");
             return;
         }
+        SetStatus(Phase.Farming, $"Фармлю FATE{(Zone != null ? " в " + Zone.Zone.Name : "")}: {Gems}/{Target} биколоров.");
+    }
 
+    private void TickFarming(DateTime now)
+    {
         Gems = GemCount();
-        if (Phase == Phase.Farming)
-        {
-            var (done, total) = BuyProgress();
-            if (done < total)
-            {
-                if (Gems >= Target && gemsReachedAt == DateTime.MinValue) gemsReachedAt = now;
-                Status = gemsReachedAt != DateTime.MinValue
-                    ? $"Биколоры есть ({Gems}). Auto FATE Grind едет к торговцу и покупает: куплено {done}/{total}."
-                    : $"Фармлю FATE{(Zone != null ? " в " + Zone.Zone.Name : "")}: {Gems}/{Target} биколоров.";
-                if (gemsReachedAt != DateTime.MinValue && now - gemsReachedAt > TimeSpan.FromMinutes(15))
-                {
-                    Run("/afg stop");
-                    afg.Restore();
-                    SetStatus(Phase.Failed, $"Биколоры набраны, но за 15 минут Auto FATE Grind купил только {done}/{total}. Посмотри /afg log.");
-                }
-                return;
-            }
-            Run("/afg stop soft");
-            stopSentAt = now;
-            idleSince = DateTime.MinValue;
-            SetStatus(Phase.Stopping, $"Всё куплено ({total}/{total}). Жду, пока Auto FATE Grind остановится.");
-            return;
-        }
+        Status = $"Фармлю FATE{(Zone != null ? " в " + Zone.Zone.Name : "")}: {Gems}/{Target} биколоров.";
+        if (Gems < Target) return;
+        Run("/afg stop soft");
+        stopSentAt = now;
+        idleSince = DateTime.MinValue;
+        SetStatus(Phase.Stopping, $"Набрал {Gems}/{Target}. Жду, пока Auto FATE Grind закончит текущий FATE.");
+    }
 
-        // Stopping: wait until the character has been idle for a while.
+    private void TickStopping(DateTime now)
+    {
         if (!forcedStop && now - stopSentAt > TimeSpan.FromMinutes(Math.Max(1, Config.SoftStopTimeoutMinutes)))
         {
             Run("/afg stop");
@@ -432,74 +524,82 @@ public sealed class Plugin : IDalamudPlugin
         if (now - idleSince < TimeSpan.FromSeconds(Math.Max(2, Config.IdleSeconds))) return;
 
         afg.Restore();
-        if (Config.DispatchAfterFarming)
+        EnterBuying();
+    }
+
+    private void TickBuying(DateTime now)
+    {
+        if (!vendorStarted)
         {
-            SetStatus(Phase.Done, "Материалы за биколоры куплены. Запустил корзину LazyCrafter.");
-            Dispatch();
+            var res = Vulcan.StartVendorList();
+            switch (res)
+            {
+                case "Started":
+                case "AlreadyRunning":
+                    vendorStarted = true;
+                    phaseStartedAt = now;
+                    return;
+                case "Empty":
+                case "NoPendingEntries":
+                    EnterCrafting();
+                    return;
+                case "VendorDataLoading":
+                case "LocationDataLoading":
+                case "WaitingForPreviousInteraction":
+                case "AnotherPurchaseRunning":
+                    Status = $"Vulcan ещё не готов к покупкам ({res}), жду…";
+                    if (now - phaseStartedAt > TimeSpan.FromSeconds(120))
+                        SetStatus(Phase.Failed, $"Vulcan так и не начал покупки: {res}. {Vulcan.VendorStatus}");
+                    return;
+                default:
+                    SetStatus(Phase.Failed, $"Vulcan не начал покупки: {res}. {Vulcan.VendorStatus}");
+                    return;
+            }
         }
-        else
+
+        if (Vulcan.VendorBusy || now - phaseStartedAt < TimeSpan.FromSeconds(3))
         {
-            SetStatus(Phase.Done, "Материалы за биколоры куплены. Корзину запусти сам.");
+            var vs = Vulcan.VendorStatus;
+            Status = "Vulcan закупает у вендоров" + (vs.Length > 0 ? $": {vs}" : "…");
+            return;
         }
+
+        var missing = VendorBuys.Where(v => BagCount(v.ItemId) < v.Target).Select(v => $"{v.Name} {BagCount(v.ItemId)}/{v.Target}").ToList();
+        if (missing.Count > 0) Print($"Vulcan купил не всё: {string.Join(", ", missing)}. {Vulcan.VendorStatus}");
+        EnterCrafting();
     }
 
-    internal void OpenLazyCrafter()
+    private void TickCrafting(DateTime now)
     {
-        if (!IsLoaded(LazyCrafter)) Print("LazyCrafter не загружен.");
-        else Run("/lcraft");
-    }
+        if (!craftStarted)
+        {
+            if (VulcanLink.ArtisanLoaded)
+            {
+                if (now - phaseStartedAt > TimeSpan.FromSeconds(30))
+                    SetStatus(Phase.Failed, "Artisan так и не выгрузился, а Vulcan не крафтит при загруженном Artisan.");
+                return;
+            }
+            var err = Vulcan.StartCrafting(CartLines(), Config.UseRetainers);
+            if (err != null)
+            {
+                RestoreArtisan();
+                SetStatus(Phase.Failed, err);
+                return;
+            }
+            craftStarted = true;
+            phaseStartedAt = now;
+            SetStatus(Phase.Crafting, $"Vulcan собирает и крафтит корзину ({Config.Cart.Count} рецептов).");
+            return;
+        }
 
-    internal void ClearCart()
-    {
-        Config.Cart.Clear();
-        Config.ImportManual.Clear();
-        Config.TeamcraftListUrl = string.Empty;
-        SaveConfig();
-    }
-
-    /// <summary>The imported Teamcraft list, or a Teamcraft import link for the plugin's cart; null when there is nothing.</summary>
-    internal string? TeamcraftLink() =>
-        Config.TeamcraftListUrl.Length > 0 ? Config.TeamcraftListUrl
-        : Config.Cart.Count > 0 ? Teamcraft.ImportLink(Config.Cart.Select(c => new CartLine(c.RecipeId, c.Crafts)), Planner)
-        : null;
-
-    internal void OpenTeamcraft()
-    {
-        if (TeamcraftLink() is { } url) Dalamud.Utility.Util.OpenLink(url);
-        else Print("корзина пуста — нечего открывать в Teamcraft.");
-    }
-
-    /// <summary>What CraftMeThis (with LazyCrafter and Auto FATE Grind) will not do on its own for the LazyCrafter cart.</summary>
-    internal List<string> ManualTasks()
-    {
-        var list = new List<string>(Config.ImportManual);
-
-        var market = Plan.Leaves.Where(kv => Sources.Of(kv.Key) == Source.Other)
-                         .OrderByDescending(kv => kv.Value).Select(kv => $"{Planner.ItemName(kv.Key)} x{kv.Value}").ToList();
-        if (market.Count > 0)
-            list.Add($"Купить на рынке руками (нет ни сбора, ни вендора; LazyCrafter откроет доску и будет ждать, часть может отдать в вылазки ретейнеров): {string.Join(", ", market)}.");
-
-        if (Zone?.Sold.Where(s => s.Rank > 1).ToList() is { Count: > 0 } ranked)
-            list.Add($"Открыть ранг {ranked.Max(s => s.Rank)} общих FATE в {Zone.Zone.Name}: без него торговец не продаст {string.Join(", ", ranked.Select(s => s.Item))}.");
-
-        if (Plan.Gems + Config.Reserve > Planner.GemCap)
-            list.Add($"Корзине нужно {Plan.Gems} биколоров, а больше {Planner.GemCap} не носить: разбей корзину на части.");
-
-        if (Plan.Recipes.Count > 0)
-            list.Add("Достать материалы из седельной сумки и снять их с продажи у ретейнеров: LazyCrafter попросит, но сделать это нужно самому.");
-        return list;
-    }
-
-    internal void OpenFateGrind()
-    {
-        if (!IsLoaded(AutoFateGrind)) Print("Auto FATE Grind не загружен.");
-        else Run("/afg");
-    }
-
-    private void Dispatch()
-    {
-        if (!Run("/lcraft dispatch"))
-            SetStatus(Phase.Failed, "Команда /lcraft dispatch не сработала.");
+        if (Vulcan.CraftingRunning || now - phaseStartedAt < TimeSpan.FromSeconds(5))
+        {
+            var st = Vulcan.CraftingState;
+            Status = "Vulcan: " + (st.Length > 0 ? st : "запускается…");
+            return;
+        }
+        RestoreArtisan();
+        SetStatus(Phase.Done, "Готово: Vulcan закончил очередь крафта.");
     }
 
     private static unsafe bool IsIdle()
@@ -533,7 +633,7 @@ public sealed class Plugin : IDalamudPlugin
         return count;
     }
 
-    private static unsafe int BagCount(uint itemId)
+    internal static unsafe int BagCount(uint itemId)
     {
         var im = InventoryManager.Instance();
         if (im == null) return 0;

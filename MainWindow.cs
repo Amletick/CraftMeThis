@@ -14,7 +14,6 @@ public sealed class MainWindow : Window
     private readonly Plugin p;
     private string importText = string.Empty;
     private bool importReplace = true;
-    private bool sendReplace = true;
 
     public MainWindow(Plugin plugin) : base("CraftMeThis###CraftMeThisMain")
     {
@@ -93,6 +92,8 @@ public sealed class MainWindow : Window
             Phase.Preparing => ("подготовка", Ui.Warn),
             Phase.Farming => ("фарм FATE", Ui.Gem),
             Phase.Stopping => ("завершаю FATE", Ui.Warn),
+            Phase.Buying => ("покупки", Ui.Accent),
+            Phase.Crafting => ("крафт", Ui.Accent),
             Phase.Done => ("готово", Ui.Good),
             Phase.Failed => ("ошибка", Ui.Bad),
             _ => ("ожидание", Ui.Muted),
@@ -100,7 +101,7 @@ public sealed class MainWindow : Window
         Ui.Pill(label, color);
 
         // Right-aligned shortcuts: the Teamcraft list and the other plugins' windows.
-        const string tc = "Teamcraft", lc = "LazyCrafter", afg = "FATE Grind";
+        const string tc = "Teamcraft", lc = "Vulcan", afg = "FATE Grind";
         var style = ImGui.GetStyle();
         var w = ImGui.CalcTextSize(tc).X + ImGui.CalcTextSize(lc).X + ImGui.CalcTextSize(afg).X
                 + 3 * (style.FramePadding.X * 2 + 22) + 2 * style.ItemSpacing.X;
@@ -113,7 +114,7 @@ public sealed class MainWindow : Window
             p.OpenTeamcraft();
         ImGui.EndDisabled();
         ImGui.SameLine();
-        if (Ui.IconButton(FontAwesomeIcon.ShoppingCart, lc, "Открыть окно LazyCrafter (/lcraft)")) p.OpenLazyCrafter();
+        if (Ui.IconButton(FontAwesomeIcon.Hammer, lc, "Открыть Vulcan (GatherBuddy, /vulcan)")) p.OpenVulcan();
         ImGui.SameLine();
         if (Ui.IconButton(FontAwesomeIcon.Crosshairs, afg, "Открыть окно Auto FATE Grind (/afg)")) p.OpenFateGrind();
     }
@@ -150,10 +151,32 @@ public sealed class MainWindow : Window
             Ui.EndCard();
         }
 
-        if (Ui.BeginCard("lccart"))
+        var vendorOnly = p.VendorBuys.Where(v => !v.ForGemstones).ToList();
+        if (vendorOnly.Count > 0 && Ui.BeginCard("vendors"))
         {
-            Ui.Caption("Корзина LazyCrafter");
-            ImGui.TextWrapped(p.Plan.Recipes.Count == 0 ? "пусто" : string.Join(", ", p.Plan.Recipes));
+            Ui.Caption("Купит Vulcan у вендоров (гил, GC, скрипы…)");
+            if (ImGui.BeginTable("vendorbuys", 2, ImGuiTableFlags.RowBg | ImGuiTableFlags.PadOuterX))
+            {
+                ImGui.TableSetupColumn("Материал", ImGuiTableColumnFlags.WidthStretch);
+                ImGui.TableSetupColumn("Кол-во", ImGuiTableColumnFlags.WidthFixed, 60);
+                foreach (var v in vendorOnly)
+                {
+                    ImGui.TableNextRow();
+                    ImGui.TableNextColumn();
+                    Ui.GameIcon(p.Planner.ItemIcon(v.ItemId), RowIcon);
+                    ImGui.SameLine();
+                    Ui.CenteredText(v.Name, RowIcon);
+                    ImGui.TableNextColumn(); Ui.CenteredText(v.Units.ToString(), RowIcon);
+                }
+                ImGui.EndTable();
+            }
+            Ui.EndCard();
+        }
+
+        if (Ui.BeginCard("cartsum"))
+        {
+            Ui.Caption("Корзина");
+            ImGui.TextWrapped(p.Plan.Recipes.Count == 0 ? "пусто — импортируй список на вкладке «Корзина»" : string.Join(", ", p.Plan.Recipes));
             Ui.EndCard();
         }
 
@@ -165,7 +188,7 @@ public sealed class MainWindow : Window
         else
         {
             var avail = ImGui.GetContentRegionAvail().X;
-            var label = p.Plan.Purchases.Count > 0 ? "Нафармить биколоры и запустить корзину" : "Запустить корзину LazyCrafter";
+            var label = p.Plan.Gems > p.Gems ? "Нафармить, закупить и скрафтить" : p.VendorBuys.Count > 0 ? "Закупить и скрафтить" : "Скрафтить корзину";
             if (Ui.Primary(label, FontAwesomeIcon.Play, Ui.Accent, avail - 46)) p.Start();
             ImGui.SameLine();
             ImGui.SetCursorPosY(ImGui.GetCursorPosY() + 3);
@@ -313,12 +336,6 @@ public sealed class MainWindow : Window
             return;
         }
 
-        if (Ui.Primary("Отправить в LazyCrafter", FontAwesomeIcon.PaperPlane, Ui.Accent, 230)) p.CartMessage = p.SendToLazyCrafter(sendReplace);
-        ImGui.SameLine();
-        ImGui.SetCursorPosY(ImGui.GetCursorPosY() + 6);
-        ImGui.Checkbox("вместо его корзины", ref sendReplace);
-        ImGui.SameLine();
-        ImGui.SetCursorPosY(ImGui.GetCursorPosY() + 6);
         if (Ui.IconButton(FontAwesomeIcon.Trash, "Очистить")) p.ClearCart();
 
         if (ImGui.BeginTable("cart", 3, ImGuiTableFlags.RowBg | ImGuiTableFlags.PadOuterX))
@@ -339,27 +356,13 @@ public sealed class MainWindow : Window
                 ImGui.TableNextColumn();
                 ImGui.SetNextItemWidth(-1);
                 var crafts = e.Crafts;
-                if (ImGui.InputInt("##n", ref crafts) && crafts > 0) { e.Crafts = crafts; p.SaveConfig(); }
+                if (ImGui.InputInt("##n", ref crafts) && crafts > 0) { e.Crafts = crafts; p.SaveConfig(); p.Recalculate(); }
                 ImGui.TableNextColumn();
                 if (Ui.IconButton(FontAwesomeIcon.Times, "", "Убрать")) remove = e;
                 ImGui.PopID();
             }
             ImGui.EndTable();
-            if (remove != null) { cart.Remove(remove); p.SaveConfig(); }
-        }
-
-        var plan = p.OwnCartPlan();
-        ImGui.Spacing();
-        if (plan.Gems > 0)
-        {
-            Ui.GameIcon(p.Planner.ItemIcon(Planner.BicolorGemstone), 20);
-            ImGui.SameLine();
-            Ui.CenteredText($"Этой корзине нужно {plan.Gems} биколоров (есть {Plugin.GemCount()})", 20, Ui.Gem);
-            DrawGemTable("owngems", plan);
-        }
-        else
-        {
-            ImGui.TextColored(Ui.Muted, "Биколоры этой корзине не нужны.");
+            if (remove != null) { cart.Remove(remove); p.SaveConfig(); p.Recalculate(); }
         }
         Ui.EndCard();
     }
@@ -439,12 +442,27 @@ public sealed class MainWindow : Window
             ImGui.TextColored(Ui.Muted, "Твои зоны и очередь классов AFG возвращаются после фарма.");
             Ui.EndCard();
         }
+        if (Ui.BeginCard("set-vulcan"))
+        {
+            Ui.Caption("Vulcan (GatherBuddy)");
+            var buy = c.BuyFromVendors;
+            if (ImGui.Checkbox("Закупать у вендоров (гил, GC, биколоры…)", ref buy)) { c.BuyFromVendors = buy; p.SaveConfig(); }
+            var craft = c.CraftAfterBuying;
+            if (ImGui.Checkbox("Крафтить после закупки (сбор недостающего + крафт)", ref craft)) { c.CraftAfterBuying = craft; p.SaveConfig(); }
+            var ret = c.UseRetainers;
+            if (ImGui.Checkbox("Брать материалы у ретейнеров (нужен Allagan Tools)", ref ret)) { c.UseRetainers = ret; p.SaveConfig(); }
+            var toggle = c.ToggleArtisan;
+            if (ImGui.Checkbox("Выключать Artisan на время крафта", ref toggle)) { c.ToggleArtisan = toggle; p.SaveConfig(); }
+            ImGui.BeginDisabled(!c.ToggleArtisan);
+            var back = c.ReenableArtisan;
+            if (ImGui.Checkbox("…и включать обратно после", ref back)) { c.ReenableArtisan = back; p.SaveConfig(); }
+            ImGui.EndDisabled();
+            ImGui.TextColored(Ui.Muted, "Vulcan не крафтит, пока загружен Artisan.");
+            Ui.EndCard();
+        }
         if (Ui.BeginCard("set-handoff"))
         {
-            Ui.Caption("Передача в LazyCrafter");
-            var dispatch = c.DispatchAfterFarming;
-            if (ImGui.Checkbox("Запускать корзину после фарма", ref dispatch)) { c.DispatchAfterFarming = dispatch; p.SaveConfig(); }
-            ImGui.SetNextItemWidth(120);
+            Ui.Caption("Остановка фарма");
             var idle = c.IdleSeconds;
             if (ImGui.InputInt("Секунд простоя перед запуском", ref idle)) { c.IdleSeconds = Math.Clamp(idle, 2, 60); p.SaveConfig(); }
             ImGui.SetNextItemWidth(120);
@@ -454,9 +472,9 @@ public sealed class MainWindow : Window
         }
         if (Ui.BeginCard("set-req"))
         {
-            Ui.Caption("Как покупаются материалы за биколоры");
+            Ui.Caption("Кто что делает");
             Ui.Icon(FontAwesomeIcon.Crosshairs, Ui.Accent); ImGui.SameLine();
-            ImGui.TextWrapped("LazyCrafter не знает торговцев биколорами, поэтому покупает Auto FATE Grind: на время запуска CraftMeThis подставляет ему список покупок, порог и «стоп после покупки», а потом возвращает твои настройки.");
+            ImGui.TextWrapped("Auto FATE Grind только фармит биколоры: на время запуска CraftMeThis ставит ему зону, выключает фильтр уровней и его собственные покупки, потом возвращает твои настройки. Покупает у Gemstone Trader уже Vulcan, вместе с остальными вендорами.");
             Ui.EndCard();
         }
     }
