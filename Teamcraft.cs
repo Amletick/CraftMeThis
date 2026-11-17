@@ -1,8 +1,11 @@
 using System;
 using System.Collections.Generic;
 using System.Linq;
+using System.Net.Http;
 using System.Text;
+using System.Text.Json;
 using System.Text.RegularExpressions;
+using System.Threading.Tasks;
 
 namespace CraftMeThis;
 
@@ -15,6 +18,8 @@ public sealed record ImportResult(List<CartLine> Lines, List<string> Skipped, st
 /// Reads Teamcraft exports:
 ///  * import links "https://ffxivteamcraft.com/import/&lt;base64&gt;" (or the bare base64), whose payload is
 ///    "itemId,recipeId|null,quantity;..." — the same format LazyCrafter exports;
+///  * list links "https://ffxivteamcraft.com/list/&lt;id&gt;", read from Teamcraft's public Firestore document
+///    (see <see cref="FromListJson"/>);
 ///  * "Copy as text" lists ("5x Item name" lines). When the text has a "Final items" section only that section
 ///    is used, so pre-crafts and raw materials are not added twice.
 /// </summary>
@@ -35,6 +40,11 @@ public static class Teamcraft
         if (items.Count == 0)
             return new ImportResult(new(), skipped, "Не нашёл ни одного предмета. Ожидаю ссылку ffxivteamcraft.com/import/... или строки вида «5x Название».");
 
+        return ToCart(items, planner, skipped);
+    }
+
+    private static ImportResult ToCart(IEnumerable<ImportedItem> items, Planner planner, List<string> skipped)
+    {
         var lines = new Dictionary<uint, int>();
         foreach (var it in items)
         {
@@ -50,6 +60,104 @@ public static class Teamcraft
         }
         return new ImportResult(lines.Select(kv => new CartLine(kv.Key, kv.Value)).ToList(), skipped, null);
     }
+
+    // ------------------------------------------------------------- list links
+
+    private static readonly Regex ListLink = new(@"ffxivteamcraft\.com/(?:[a-z-]+/)?list/([A-Za-z0-9]{8,})", RegexOptions.IgnoreCase);
+    private static readonly HttpClient Http = new() { Timeout = TimeSpan.FromSeconds(20) };
+
+    /// <summary>The list id of a "ffxivteamcraft.com/list/&lt;id&gt;" link, or null.</summary>
+    public static string? ListId(string input)
+    {
+        var m = ListLink.Match(input);
+        return m.Success ? m.Groups[1].Value : null;
+    }
+
+    /// <summary>Downloads a list document. Lists shared by link are readable without signing in.</summary>
+    public static async Task<string> FetchListJson(string id)
+    {
+        var url = $"https://firestore.googleapis.com/v1/projects/ffxivteamcraft/databases/(default)/documents/lists/{Uri.EscapeDataString(id)}";
+        using var resp = await Http.GetAsync(url).ConfigureAwait(false);
+        var body = await resp.Content.ReadAsStringAsync().ConfigureAwait(false);
+        if (resp.StatusCode == System.Net.HttpStatusCode.NotFound) throw new InvalidOperationException("такого списка нет");
+        if (!resp.IsSuccessStatusCode) throw new InvalidOperationException($"Teamcraft ответил {(int)resp.StatusCode} — список, наверное, приватный");
+        return body;
+    }
+
+    /// <summary>
+    /// A Teamcraft list document → cart. Final items with a normal recipe are crafted as they are. Free Company workshop
+    /// items (recipe id "fc…") are built in the workshop phase by phase, which LazyCrafter/Artisan cannot do, so their
+    /// craftable components go into the cart instead; their raw materials are listed as skipped.
+    /// </summary>
+    public static ImportResult FromListJson(string json, Planner planner, out string listName)
+    {
+        listName = "";
+        var skipped = new List<string>();
+        var items = new List<ImportedItem>();
+        using var doc = JsonDocument.Parse(json);
+        if (!doc.RootElement.TryGetProperty("fields", out var fields))
+            return new ImportResult(new(), skipped, "Teamcraft вернул не список.");
+        listName = Str(fields, "name") ?? "";
+        if (!fields.TryGetProperty("finalItems", out var finals))
+            return new ImportResult(new(), skipped, "В списке нет финальных предметов.");
+
+        var workshop = new List<string>();
+        var raw = new Dictionary<uint, int>();
+        foreach (var f in Values(finals))
+        {
+            var id = Num(f, "id");
+            var left = Math.Max(0, Num(f, "amount") - Num(f, "done"));
+            if (id == 0 || left == 0) continue;
+            var recipe = Str(f, "recipeId");
+            if (uint.TryParse(recipe, out var rid) && rid > 0)
+            {
+                items.Add(new ImportedItem((uint)id, rid, left));
+                continue;
+            }
+
+            // Workshop (or otherwise non-standard) item: craft its components.
+            workshop.Add(planner.ItemName((uint)id));
+            var yield = Math.Max(1, Num(f, "yield"));
+            var times = (left + yield - 1) / yield;
+            if (!f.TryGetProperty("requires", out var req)) continue;
+            foreach (var r in Values(req))
+            {
+                var rid2 = (uint)Num(r, "id");
+                var qty = Num(r, "amount") * times;
+                if (rid2 == 0 || qty <= 0) continue;
+                if (planner.ResolveRecipe(rid2, null) != null) items.Add(new ImportedItem(rid2, null, qty));
+                else if (rid2 > 19) raw[rid2] = raw.GetValueOrDefault(rid2) + qty;
+            }
+        }
+
+        if (workshop.Count > 0)
+            skipped.Add($"предметы мастерской ({string.Join(", ", workshop)}) собираются в мастерской — в корзину пошли их компоненты");
+        if (raw.Count > 0)
+            skipped.Add("сырьё для мастерской не крафтится, его нужно добыть самому: " +
+                        string.Join(", ", raw.OrderByDescending(kv => kv.Value).Select(kv => $"{planner.ItemName(kv.Key)} x{kv.Value}")));
+        if (items.Count == 0)
+            return new ImportResult(new(), skipped, "В списке нет ничего, что можно скрафтить.");
+        return ToCart(items, planner, skipped);
+    }
+
+    private static IEnumerable<JsonElement> Values(JsonElement arrayField) =>
+        arrayField.TryGetProperty("arrayValue", out var av) && av.TryGetProperty("values", out var vals)
+            ? vals.EnumerateArray().Select(v => v.TryGetProperty("mapValue", out var mv) && mv.TryGetProperty("fields", out var fs) ? fs : default)
+                  .Where(x => x.ValueKind == JsonValueKind.Object)
+            : Enumerable.Empty<JsonElement>();
+
+    private static string? Str(JsonElement fields, string key)
+    {
+        if (!fields.TryGetProperty(key, out var v)) return null;
+        foreach (var p in v.EnumerateObject())
+            return p.Value.ValueKind == JsonValueKind.String ? p.Value.GetString() : p.Value.ToString();
+        return null;
+    }
+
+    private static int Num(JsonElement fields, string key) =>
+        int.TryParse(Str(fields, key), out var n) ? n : 0;
+
+    // ------------------------------------------------------------- import links
 
     /// <returns>null when the input is not a link/base64 payload at all.</returns>
     private static List<ImportedItem>? TryParseLink(string input, out string? error)

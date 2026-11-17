@@ -14,7 +14,6 @@ public sealed class MainWindow : Window
     private string importText = string.Empty;
     private bool importReplace = true;
     private bool sendReplace = true;
-    private string cartMessage = string.Empty;
 
     public MainWindow(Plugin plugin) : base("CraftMeThis###CraftMeThisMain")
     {
@@ -180,21 +179,21 @@ public sealed class MainWindow : Window
 
     private void DrawCart()
     {
-        ImGui.TextWrapped("Вставь ссылку импорта Teamcraft (Export → Copy import link), текст списка (Copy as text) или строки вида «5x Boiled Alpaca Steak».");
+        ImGui.TextWrapped("Вставь ссылку на список Teamcraft (ffxivteamcraft.com/list/...), ссылку импорта, текст списка (Copy as text) или строки вида «5x Boiled Alpaca Steak».");
         ImGui.InputTextMultiline("##import", ref importText, 20000, new Vector2(-1, 90));
         if (ImGui.Button("Вставить из буфера")) importText = ImGui.GetClipboardText() ?? string.Empty;
         ImGui.SameLine();
-        if (ImGui.Button("Импорт"))
-        {
-            cartMessage = p.Import(importText, importReplace);
-            if (cartMessage.StartsWith("Импортировано")) importText = string.Empty;
-        }
+        ImGui.BeginDisabled(p.ImportBusy);
+        if (ImGui.Button(p.ImportBusy ? "Загружаю…" : "Импорт") && p.Import(importText, importReplace) && p.CartMessage.StartsWith("Импортировано"))
+            importText = string.Empty;
+        ImGui.EndDisabled();
         ImGui.SameLine();
         ImGui.Checkbox("Заменить корзину", ref importReplace);
 
+        var cartMessage = p.CartMessage;
         if (cartMessage.Length > 0)
         {
-            ImGui.PushStyleColor(ImGuiCol.Text, cartMessage.StartsWith("Импортировано") || cartMessage.StartsWith("Корзина LazyCrafter") || cartMessage.StartsWith("Добавлено") ? Good : Warn);
+            ImGui.PushStyleColor(ImGuiCol.Text, cartMessage.Contains("Импортировано") || cartMessage.StartsWith("Загружаю") || cartMessage.StartsWith("Корзина LazyCrafter") || cartMessage.StartsWith("Добавлено") ? Good : Warn);
             ImGui.TextWrapped(cartMessage);
             ImGui.PopStyleColor();
         }
@@ -207,7 +206,7 @@ public sealed class MainWindow : Window
             return;
         }
 
-        if (ImGui.Button("Отправить в LazyCrafter")) cartMessage = p.SendToLazyCrafter(sendReplace);
+        if (ImGui.Button("Отправить в LazyCrafter")) p.CartMessage = p.SendToLazyCrafter(sendReplace);
         ImGui.SameLine();
         ImGui.Checkbox("вместо его корзины", ref sendReplace);
         ImGui.SameLine();

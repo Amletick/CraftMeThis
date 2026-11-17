@@ -3,6 +3,7 @@ using System.Collections.Generic;
 using System.IO;
 using System.Linq;
 using System.Text.Json;
+using System.Threading.Tasks;
 using Dalamud.Configuration;
 using Dalamud.Game;
 using Dalamud.Game.ClientState.Conditions;
@@ -222,15 +223,53 @@ public sealed class Plugin : IDalamudPlugin
 
     // ---------------------------------------------------------------- own cart
 
-    internal string Import(string text, bool replace)
+    /// <summary>Last import/send result shown on the Cart tab; set from the framework thread.</summary>
+    internal string CartMessage { get; set; } = string.Empty;
+    internal bool ImportBusy { get; private set; }
+
+    /// <returns>true when the import finished (or failed) right away; false while a list link is downloading.</returns>
+    internal bool Import(string text, bool replace)
     {
-        var res = Teamcraft.Parse(text, Planner);
-        if (res.Error != null) return res.Error;
+        if (Teamcraft.ListId(text) is { } listId)
+        {
+            if (ImportBusy) return false;
+            ImportBusy = true;
+            CartMessage = "Загружаю список Teamcraft…";
+            Task.Run(async () =>
+            {
+                string? json = null, error = null;
+                try { json = await Teamcraft.FetchListJson(listId); }
+                catch (Exception ex) { error = $"Не удалось загрузить список Teamcraft: {ex.Message}"; }
+                await Framework.RunOnFrameworkThread(() =>
+                {
+                    ImportBusy = false;
+                    if (error != null) { CartMessage = error; return; }
+                    try
+                    {
+                        var res = Teamcraft.FromListJson(json!, Planner, out var name);
+                        CartMessage = (name.Length > 0 ? $"«{name}»: " : "") + ApplyImport(res, replace);
+                    }
+                    catch (Exception ex)
+                    {
+                        CartMessage = $"Не разобрал список Teamcraft: {ex.Message}";
+                    }
+                });
+            });
+            return false;
+        }
+        CartMessage = ApplyImport(Teamcraft.Parse(text, Planner), replace);
+        return true;
+    }
+
+    private string ApplyImport(ImportResult res, bool replace)
+    {
+        if (res.Error != null)
+            return res.Error + (res.Skipped.Count > 0 ? " " + string.Join("; ", res.Skipped) : "");
         if (replace) Config.Cart.Clear();
         foreach (var l in res.Lines) AddToCart(l.RecipeId, l.Crafts, save: false);
         SaveConfig();
         var msg = $"Импортировано рецептов: {res.Lines.Count}.";
-        if (res.Skipped.Count > 0) msg += " Пропущено: " + string.Join("; ", res.Skipped.Take(8)) + (res.Skipped.Count > 8 ? " …" : "");
+        if (res.Skipped.Count > 0) msg += " Заметки: " + string.Join("; ", res.Skipped.Take(8)) + (res.Skipped.Count > 8 ? " …" : "");
         return msg;
     }
 

@@ -28,6 +28,9 @@ Commands: `/craftme plan`, `/craftme start`, `/craftme stop`.
 ## Teamcraft import
 
 Paste any of these:
+- a list link (`https://ffxivteamcraft.com/list/<id>`). The list is read from Teamcraft's public data, so it must be
+  shared by link. Free Company workshop items (submarine and airship parts, recipe id `fc…`) are built phase by phase
+  in the workshop, which LazyCrafter cannot do, so their craftable components go into the cart instead;
 - an import link (`https://ffxivteamcraft.com/import/...`, also exported by LazyCrafter);
 - a "Copy as text" list (only the *Final items* section is used);
 - plain lines like `5x Boiled Alpaca Steak`.
