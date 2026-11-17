@@ -10,6 +10,7 @@ namespace CraftMeThis;
 /// them through reflection before "/afg start" and puts the user's values back afterwards:
 ///  * SelectedZones — the farm zone;
 ///  * ApplyClassOnStart — off, this plugin picks the job;
+///  * LevelRangeFilterEnabled / LevelWindowEnabled — off, so FATEs below the job's level are taken (level sync);
 ///  * TradeList / TradeOnCap / TradeThreshold / SpendMode / KeepGemstonesReserve / AfterTrade — AFG's own
 ///    "buy from the Gemstone Trader" hand-off: once the wallet reaches the threshold it travels to the trader,
 ///    buys each listed item up to its StopAtCount and, with AfterTrade = Stop, ends the run.
@@ -44,6 +45,10 @@ public sealed class AfgLink
                 zones.Add(territory);
             }
             Set(cfg, "ApplyClassOnStart", false);
+            // FATEs of the chosen zone may be far below the job's level (Urqopacha 90-92 on a level 100 job):
+            // AFG's "player level -5..+2" filter would then find nothing and wait forever. Level sync handles it.
+            Set(cfg, "LevelRangeFilterEnabled", false);
+            Set(cfg, "LevelWindowEnabled", false);
 
             if (purchases.Count > 0)
             {
