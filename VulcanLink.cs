@@ -242,6 +242,25 @@ public sealed class VulcanLink
 
     public bool CraftingRunning => QueueProcessor() != null;
 
+    /// <summary>Recipe Vulcan is crafting right now (CraftingGameInterop.CurrentRecipe), 0 when none.</summary>
+    public uint CurrentRecipeId
+    {
+        get
+        {
+            if (!CraftingRunning) return 0;
+            try
+            {
+                var r = T("GatherBuddy.Crafting.CraftingGameInterop").GetProperty("CurrentRecipe", Any)?.GetValue(null);
+                if (r?.GetType().GetProperty("RowId", Any)?.GetValue(r) is uint id && id != 0) return id;
+                return T("GatherBuddy.Crafting.CraftingGatherBridge").GetProperty("RecipeToCraft", Any)?.GetValue(null) is uint q ? q : 0;
+            }
+            catch
+            {
+                return 0;
+            }
+        }
+    }
+
     /// <summary>Queue state name ("WaitingForGather", "Crafting", …), "Paused: …" or "".</summary>
     public string CraftingState
     {

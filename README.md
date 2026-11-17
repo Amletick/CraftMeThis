@@ -23,6 +23,9 @@ The header has buttons that open the Teamcraft list, Vulcan (`/vulcan`) and Auto
 - **Materials**: every raw material the cart is missing, grouped by route — gather/fish (Vulcan's queue gathers it),
   Bicolor (AFG farms the gemstones, Vulcan buys), vendor (Vulcan's buy list: gil, GC, scrips…) or market/by hand.
   Each material can be switched to any route it supports; "auto" picks gather → gemstones → vendor → by hand.
+- **Tree**: the cart as a craft tree (cart recipes → precrafts → raw materials, crystals hidden) with bag counts and a
+  status per line: done, being crafted (Vulcan's current recipe), ready to craft, waiting for materials, and for raw
+  materials gather / gemstones / vendor / by hand; after a run, cart lines Vulcan did not finish are marked. Updates every second.
 - **Materials in Vulcan**: the cart is mirrored into Vulcan's persistent crafting list "CraftMeThis" (updated on every
   cart change); the button opens that list together with Vulcan's own Materials window.
 - **Jobs**: job priority (up/down arrows), on/off per job, level and gearset.

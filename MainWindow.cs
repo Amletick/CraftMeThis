@@ -42,6 +42,7 @@ public sealed class MainWindow : Window
             if (ImGui.BeginTabItem("  Фарм  ")) { Scroll("farm", DrawFarm); ImGui.EndTabItem(); }
             if (ImGui.BeginTabItem($"  Корзина ({p.Config.Cart.Count})  ")) { Scroll("cart", DrawCart); ImGui.EndTabItem(); }
             if (ImGui.BeginTabItem($"  Материалы ({p.Materials.Count})  ")) { Scroll("materials", DrawMaterials); ImGui.EndTabItem(); }
+            if (ImGui.BeginTabItem("  Дерево  ")) { DrawTree(); ImGui.EndTabItem(); }
             if (ImGui.BeginTabItem("  Классы  ")) { DrawJobs(); ImGui.EndTabItem(); }
             if (ImGui.BeginTabItem("  Настройки  ")) { Scroll("settings", DrawSettings); ImGui.EndTabItem(); }
             ImGui.EndTabBar();
@@ -452,6 +453,110 @@ public sealed class MainWindow : Window
             }
             Ui.EndCard();
         }
+    }
+
+    // ---------------------------------------------------------------- craft tree
+
+    private System.Collections.Generic.List<TreeNode> tree = new();
+    private DateTime treeBuiltAt = DateTime.MinValue;
+    private uint craftingRecipe;
+
+    private static (FontAwesomeIcon Icon, Vector4 Color, string Label) StateLook(NodeState s) => s switch
+    {
+        NodeState.Done => (FontAwesomeIcon.CheckCircle, Ui.Good, "готово"),
+        NodeState.Crafting => (FontAwesomeIcon.Cog, Ui.Accent, "крафтится"),
+        NodeState.Ready => (FontAwesomeIcon.Hammer, Ui.Accent, "можно крафтить"),
+        NodeState.Waiting => (FontAwesomeIcon.Hourglass, Ui.Muted, "ждёт материалы"),
+        NodeState.Gather => (FontAwesomeIcon.Leaf, Ui.Good, "соберёт Vulcan"),
+        NodeState.Bicolor => (FontAwesomeIcon.Gem, Ui.Gem, "за биколоры"),
+        NodeState.Vendor => (FontAwesomeIcon.Store, Ui.Accent, "купит Vulcan"),
+        NodeState.Manual => (FontAwesomeIcon.HandPaper, Ui.Warn, "вручную / рынок"),
+        _ => (FontAwesomeIcon.TimesCircle, Ui.Bad, "не скрафчено"),
+    };
+
+    private NodeState State(TreeNode n) => CraftTree.StateOf(n, craftingRecipe, p.Crafted, p.FailedItems);
+
+    private void DrawTree()
+    {
+        if (p.Config.Cart.Count == 0)
+        {
+            ImGui.Spacing();
+            ImGui.TextColored(Ui.Muted, "Корзина пуста — импортируй список на вкладке «Корзина».");
+            return;
+        }
+        if (DateTime.UtcNow - treeBuiltAt > TimeSpan.FromSeconds(1))
+        {
+            tree = CraftTree.Build(p);
+            craftingRecipe = p.Phase == Phase.Crafting ? p.Vulcan.CurrentRecipeId : 0;
+            treeBuiltAt = DateTime.UtcNow;
+        }
+
+        // Summary: how many lines are in each state.
+        var all = new System.Collections.Generic.List<TreeNode>();
+        void Walk(TreeNode n) { all.Add(n); foreach (var c in n.Children) Walk(c); }
+        foreach (var r in tree) Walk(r);
+        ImGui.Spacing();
+        var first = true;
+        foreach (var g in all.GroupBy(State).OrderBy(g => g.Key))
+        {
+            if (!first) ImGui.SameLine();
+            first = false;
+            var (_, color, label) = StateLook(g.Key);
+            Ui.Pill($"{label}: {g.Count()}", color);
+        }
+        ImGui.SameLine();
+        if (Ui.IconButton(FontAwesomeIcon.Boxes, "Materials в Vulcan")) p.OpenVulcanMaterials();
+
+        var flags = ImGuiTableFlags.RowBg | ImGuiTableFlags.ScrollY | ImGuiTableFlags.PadOuterX | ImGuiTableFlags.BordersInnerH;
+        if (!ImGui.BeginTable("tree", 3, flags, new Vector2(-1, footer > 0 ? -footer : -1))) return;
+        ImGui.TableSetupScrollFreeze(0, 1);
+        ImGui.TableSetupColumn("Предмет", ImGuiTableColumnFlags.WidthStretch);
+        ImGui.TableSetupColumn("Есть / нужно", ImGuiTableColumnFlags.WidthFixed, 96);
+        ImGui.TableSetupColumn("Статус", ImGuiTableColumnFlags.WidthFixed, 150);
+        ImGui.TableHeadersRow();
+        var i = 0;
+        foreach (var root in tree) DrawNode(root, ref i);
+        ImGui.EndTable();
+    }
+
+    private void DrawNode(TreeNode n, ref int index)
+    {
+        var state = State(n);
+        var (icon, color, label) = StateLook(state);
+        ImGui.TableNextRow();
+        ImGui.TableNextColumn();
+        ImGui.PushID(index++);
+
+        var leaf = n.Children.Count == 0;
+        var flags = ImGuiTreeNodeFlags.SpanFullWidth | ImGuiTreeNodeFlags.FramePadding;
+        if (leaf) flags |= ImGuiTreeNodeFlags.Leaf | ImGuiTreeNodeFlags.NoTreePushOnOpen;
+        // Open what still needs work; finished branches start collapsed.
+        if (state is not NodeState.Done) flags |= ImGuiTreeNodeFlags.DefaultOpen;
+
+        var open = ImGui.TreeNodeEx("##n", flags);
+        ImGui.SameLine();
+        Ui.GameIcon(p.Planner.ItemIcon(n.ItemId), 22);
+        ImGui.SameLine();
+        var kind = n.IsCartLine ? "" : n.RecipeId != 0 ? "  · полуфабрикат" : "";
+        Ui.CenteredText(n.Name + (n.IsCartLine ? $"  ×{n.Crafts} крафт." : ""), 22, n.IsCartLine ? Ui.Text : state == NodeState.Done ? Ui.Muted : Ui.Text);
+        if (kind.Length > 0) { ImGui.SameLine(0, 0); Ui.CenteredText(kind, 22, Ui.Muted); }
+
+        ImGui.TableNextColumn();
+        var count = n.IsCartLine && p.Crafted(n) is { } got ? $"+{got} / {n.Need}" : $"{n.Have} / {n.Need}";
+        Ui.CenteredText(count, 22, state == NodeState.Done ? Ui.Good : Ui.Text);
+
+        ImGui.TableNextColumn();
+        ImGui.SetCursorPosY(ImGui.GetCursorPosY() + (22 - ImGui.GetTextLineHeight()) / 2);
+        Ui.Icon(icon, color);
+        ImGui.SameLine();
+        ImGui.TextColored(color, label);
+
+        if (open && !leaf)
+        {
+            foreach (var c in n.Children) DrawNode(c, ref index);
+            ImGui.TreePop();
+        }
+        ImGui.PopID();
     }
 
     // ---------------------------------------------------------------- jobs

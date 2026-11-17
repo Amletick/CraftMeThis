@@ -129,6 +129,12 @@ public sealed class Plugin : IDalamudPlugin
     private List<VendorBuy> afgBuys = new();
     /// <summary>Cart result items before crafting: item → (bag count, expected gain, name).</summary>
     private Dictionary<uint, (int Before, int Expected, string Name, uint RecipeId, int Crafts)> craftBaseline = new();
+    /// <summary>Cart items the last craft run did not finish (craft tree marks them).</summary>
+    internal HashSet<uint> FailedItems { get; } = new();
+
+    /// <summary>Items gained for a cart line since the last craft run started; null before any run.</summary>
+    internal int? Crafted(TreeNode n) =>
+        craftBaseline.TryGetValue(n.ItemId, out var b) ? Math.Max(0, BagCount(n.ItemId) - b.Before) : null;
 
     private DateTime nextTick = DateTime.MinValue;
     private DateTime startAt;
@@ -742,6 +748,7 @@ public sealed class Plugin : IDalamudPlugin
             craftStarted = true;
             phaseStartedAt = now;
             craftBaseline = new();
+            FailedItems.Clear();
             foreach (var c in Config.Cart)
             {
                 var item = Planner.RecipeItem(c.RecipeId);
@@ -776,6 +783,7 @@ public sealed class Plugin : IDalamudPlugin
                 .Where(i => i.ItemId > 19 && BagCount(i.ItemId) < i.Amount)
                 .Select(i => $"{Planner.ItemName(i.ItemId)} {BagCount(i.ItemId)}/{i.Amount}")
                 .ToList();
+            FailedItems.Add(item);
             failed.Add($"{b.Name} {got}/{b.Expected}" + (lacking.Count > 0 ? $" (не хватает: {string.Join(", ", lacking)})" : ""));
         }
         Recalculate();
