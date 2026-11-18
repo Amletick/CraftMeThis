@@ -33,6 +33,7 @@ public sealed class VulcanLink
         if (gb != null && asm == instance.GetType().Assembly) return true;
         // First use, or GatherBuddy was reloaded/updated: drop everything cached from the old assembly.
         buyable.Clear();
+        prices.Clear();
         asm = instance.GetType().Assembly;
         gb = asm.GetType("GatherBuddy.GatherBuddy");
         if (gb == null) { error = "Не нашёл GatherBuddy.GatherBuddy — возможно, изменилась его версия."; return false; }
@@ -145,6 +146,106 @@ public sealed class VulcanLink
     public void StopVendor()
     {
         if (Ready(out _) && Static("VendorBuyListManager") is { } m) m.GetType().GetMethod("Stop", Any, Type.EmptyTypes)?.Invoke(m, null);
+    }
+
+    /// <summary>Vulcan's default offer for an item: price, currency and the vendor's name.</summary>
+    public sealed record VendorPrice(uint Cost, uint CurrencyId, string CurrencyName, string Group, string Vendor);
+
+    private readonly Dictionary<uint, VendorPrice?> prices = new();
+
+    /// <summary>The vendor Vulcan would buy the item from (VendorBuyListManager.TryResolveDefaultEntry). Cached.</summary>
+    public VendorPrice? PriceOf(uint itemId)
+    {
+        if (prices.TryGetValue(itemId, out var known)) return known;
+        if (!Ready(out _) || Static("VendorBuyListManager") is not { } mgr) return null;
+        VendorPrice? price = null;
+        try
+        {
+            var m = mgr.GetType().GetMethod("TryResolveDefaultEntry", Any);
+            var args = new object?[] { itemId, null, null };
+            if (m != null && m.Invoke(mgr, args) is true && args[1] is { } entry)
+            {
+                var et = entry.GetType();
+                var vendorName = args[2]?.GetType().GetProperty("Name", Any)?.GetValue(args[2]) as string ?? "";
+                price = new VendorPrice(
+                    et.GetProperty("Cost", Any)?.GetValue(entry) is uint c ? c : 0,
+                    et.GetProperty("CurrencyItemId", Any)?.GetValue(entry) is uint cur ? cur : 0,
+                    et.GetProperty("CurrencyName", Any)?.GetValue(entry) as string ?? "",
+                    et.GetProperty("Group", Any)?.GetValue(entry)?.ToString() ?? "Other",
+                    vendorName);
+            }
+        }
+        catch
+        {
+            price = null;
+        }
+        prices[itemId] = price;
+        return price;
+    }
+
+    /// <summary>How much of a vendor currency the character has, as Vulcan counts it (VendorCurrencyAvailabilityResolver).</summary>
+    public uint CurrencyHave(VendorPrice price)
+    {
+        if (!Ready(out _)) return 0;
+        try
+        {
+            var groupType = T("GatherBuddy.Vulcan.Vendors.VendorCurrencyGroup");
+            var group = Enum.Parse(groupType, price.Group);
+            var res = T("GatherBuddy.Vulcan.Vendors.VendorCurrencyAvailabilityResolver").GetMethod("Resolve", Any)!
+                .Invoke(null, new[] { group, price.CurrencyId, (object)price.CurrencyName });
+            return res?.GetType().GetProperty("AvailableAmount", Any)?.GetValue(res) is uint a ? a : 0;
+        }
+        catch
+        {
+            return 0;
+        }
+    }
+
+    /// <summary>Item of the vendor entry Vulcan is buying right now, 0 when none.</summary>
+    public uint ActiveVendorItem()
+    {
+        if (!Ready(out _) || Static("VendorBuyListManager") is not { } mgr || vendorListId == null) return 0;
+        try
+        {
+            if (mgr.GetType().GetProperty("ActiveEntryId", Any)?.GetValue(mgr) is not Guid active) return 0;
+            var list = mgr.GetType().GetProperty("Lists", Any)?.GetValue(mgr) as IEnumerable;
+            foreach (var l in list?.Cast<object>() ?? Enumerable.Empty<object>())
+            {
+                if (l.GetType().GetProperty("Entries", Any)?.GetValue(l) is not IEnumerable entries) continue;
+                foreach (var e in entries)
+                    if (e.GetType().GetProperty("Id", Any)?.GetValue(e) is Guid id && id == active)
+                        return e.GetType().GetProperty("ItemId", Any)?.GetValue(e) is uint item ? item : 0;
+            }
+        }
+        catch
+        {
+            // status only
+        }
+        return 0;
+    }
+
+    /// <summary>Queue position and the recipe being worked on: (index, count, recipe, done, total) or null.</summary>
+    public (int Index, int Count, uint Recipe, int Done, int Total)? QueueProgress()
+    {
+        var q = QueueProcessor();
+        if (q == null) return null;
+        var t = q.GetType();
+        int I(string n) => t.GetProperty(n, Any)?.GetValue(q) is int v ? v : 0;
+        var recipe = t.GetProperty("CurrentProcessedRecipeId", Any)?.GetValue(q) is uint r ? r : 0;
+        return (I("CurrentQueueIndex"), I("QueueCount"), recipe, I("CurrentProcessedRecipeCount"), I("CurrentProcessedRecipeTotal"));
+    }
+
+    /// <summary>GatherBuddy's own auto-gather status line (its IPC).</summary>
+    public static string AutoGatherStatus()
+    {
+        try
+        {
+            return Plugin.Pi.GetIpcSubscriber<string>("GatherBuddyReborn.GetAutoGatherStatusText").InvokeFunc() ?? "";
+        }
+        catch
+        {
+            return "";
+        }
     }
 
     // ---------------------------------------------------------------- crafting

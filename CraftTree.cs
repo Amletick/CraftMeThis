@@ -29,7 +29,8 @@ public enum NodeState
     Ready,      // all ingredients there, waiting for its turn
     Waiting,    // ingredients still missing
     Gather,     // raw: Vulcan's queue gathers it
-    Bicolor,    // raw: gemstone purchase
+    Bicolor,    // raw: gemstone purchase, gemstones already there
+    BicolorFarm,// raw: gemstone purchase, gemstones still to farm
     Vendor,     // raw: Vulcan vendor list
     Manual,     // raw: market / by hand
     Failed,     // the last craft run did not make it
@@ -73,7 +74,7 @@ public static class CraftTree
                 node.Children.Add(new TreeNode
                 {
                     ItemId = ing, Name = p.Planner.ItemName(ing), Need = childNeed, Have = Plugin.BagCount(ing),
-                    Route = p.RouteOf(ing),
+                    Route = p.RouteOf(ing, Math.Max(0, childNeed - Plugin.BagCount(ing))),
                 });
             }
         }
@@ -81,7 +82,7 @@ public static class CraftTree
     }
 
     /// <param name="crafted">For cart lines: items gained since the craft run started (null before any run).</param>
-    public static NodeState StateOf(TreeNode n, uint craftingRecipe, Func<TreeNode, int?> crafted, ISet<uint> failed)
+    public static NodeState StateOf(TreeNode n, uint craftingRecipe, Func<TreeNode, int?> crafted, ISet<uint> failed, bool gemsEnough)
     {
         if (n.RecipeId == 0)
         {
@@ -89,7 +90,7 @@ public static class CraftTree
             return n.Route switch
             {
                 Route.Gather => NodeState.Gather,
-                Route.Bicolor => NodeState.Bicolor,
+                Route.Bicolor => gemsEnough ? NodeState.Bicolor : NodeState.BicolorFarm,
                 Route.Vendor => NodeState.Vendor,
                 _ => NodeState.Manual,
             };

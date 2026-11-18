@@ -389,7 +389,7 @@ public sealed class MainWindow : Window
         (Route.Gather, "Сбор и рыбалка — Vulcan соберёт во время крафта", FontAwesomeIcon.Leaf),
         (Route.Bicolor, "Биколоры — нафармит AFG, купит Vulcan у Gemstone Trader", FontAwesomeIcon.Gem),
         (Route.Vendor, "Вендор — купит Vulcan (гил, GC, скрипы…)", FontAwesomeIcon.Store),
-        (Route.Market, "Рынок / вручную — сделать самому", FontAwesomeIcon.HandPaper),
+        (Route.Market, "Рынок / вручную / фарм мобов — сделать самому", FontAwesomeIcon.HandPaper),
     };
 
     private static Vector4 RouteColor(Route r) => r switch
@@ -428,9 +428,10 @@ public sealed class MainWindow : Window
             Ui.Icon(icon, RouteColor(route));
             ImGui.SameLine();
             ImGui.TextColored(RouteColor(route), $"{title}  ·  {rows.Count}");
-            if (ImGui.BeginTable($"mat-t-{route}", 4, ImGuiTableFlags.RowBg | ImGuiTableFlags.PadOuterX))
+            if (ImGui.BeginTable($"mat-t-{route}", 5, ImGuiTableFlags.RowBg | ImGuiTableFlags.PadOuterX))
             {
                 ImGui.TableSetupColumn("Материал", ImGuiTableColumnFlags.WidthStretch);
+                ImGui.TableSetupColumn("Цена у вендора", ImGuiTableColumnFlags.WidthFixed, 170);
                 ImGui.TableSetupColumn("Есть", ImGuiTableColumnFlags.WidthFixed, 50);
                 ImGui.TableSetupColumn("Не хватает", ImGuiTableColumnFlags.WidthFixed, 80);
                 ImGui.TableSetupColumn("Путь", ImGuiTableColumnFlags.WidthFixed, 160);
@@ -443,6 +444,12 @@ public sealed class MainWindow : Window
                     Ui.GameIcon(p.Planner.ItemIcon(m.ItemId), RowIcon);
                     ImGui.SameLine();
                     Ui.CenteredText(m.Name, RowIcon);
+                    ImGui.TableNextColumn();
+                    if (m.Price != null)
+                    {
+                        Ui.CenteredText(m.Price, RowIcon, m.Affordable ? Ui.Muted : Ui.Bad);
+                        if (ImGui.IsItemHovered()) ImGui.SetTooltip(m.Affordable ? m.Price : $"Не хватает валюты — {m.Shortage}. «Авто» тогда не берёт вендора.");
+                    }
                     ImGui.TableNextColumn(); Ui.CenteredText(m.Have.ToString(), RowIcon, m.Have > 0 ? Ui.Text : Ui.Muted);
                     ImGui.TableNextColumn(); Ui.CenteredText(m.Missing.ToString(), RowIcon);
                     ImGui.TableNextColumn();
@@ -478,13 +485,14 @@ public sealed class MainWindow : Window
         NodeState.Ready => (FontAwesomeIcon.Hammer, Ui.Accent, "можно крафтить"),
         NodeState.Waiting => (FontAwesomeIcon.Hourglass, Ui.Muted, "ждёт материалы"),
         NodeState.Gather => (FontAwesomeIcon.Leaf, Ui.Good, "соберёт Vulcan"),
-        NodeState.Bicolor => (FontAwesomeIcon.Gem, Ui.Gem, "за биколоры"),
+        NodeState.Bicolor => (FontAwesomeIcon.Gem, Ui.Gem, "купить за биколоры"),
+        NodeState.BicolorFarm => (FontAwesomeIcon.Crosshairs, Ui.Gem, "нафармить и купить"),
         NodeState.Vendor => (FontAwesomeIcon.Store, Ui.Accent, "купит Vulcan"),
         NodeState.Manual => (FontAwesomeIcon.HandPaper, Ui.Warn, "вручную / рынок"),
         _ => (FontAwesomeIcon.TimesCircle, Ui.Bad, "не скрафчено"),
     };
 
-    private NodeState State(TreeNode n) => CraftTree.StateOf(n, craftingRecipe, p.Crafted, p.FailedItems);
+    private NodeState State(TreeNode n) => CraftTree.StateOf(n, craftingRecipe, p.Crafted, p.FailedItems, p.Plan.Gems == 0 || p.Gems >= p.Target);
 
     private void DrawTree()
     {
@@ -517,8 +525,9 @@ public sealed class MainWindow : Window
         ImGui.SameLine();
         if (Ui.IconButton(FontAwesomeIcon.Boxes, "Materials в Vulcan")) p.OpenVulcanMaterials();
 
+        const float activityHeight = 112f;
         var flags = ImGuiTableFlags.RowBg | ImGuiTableFlags.ScrollY | ImGuiTableFlags.PadOuterX | ImGuiTableFlags.BordersInnerH;
-        if (!ImGui.BeginTable("tree", 3, flags, new Vector2(-1, footer > 0 ? -footer : -1))) return;
+        if (!ImGui.BeginTable("tree", 3, flags, new Vector2(-1, -(footer + activityHeight)))) return;
         ImGui.TableSetupScrollFreeze(0, 1);
         ImGui.TableSetupColumn("Предмет", ImGuiTableColumnFlags.WidthStretch);
         ImGui.TableSetupColumn("Есть / нужно", ImGuiTableColumnFlags.WidthFixed, 96);
@@ -527,6 +536,36 @@ public sealed class MainWindow : Window
         var i = 0;
         foreach (var root in tree) DrawNode(root, ref i);
         ImGui.EndTable();
+        DrawActivity(activityHeight - ImGui.GetStyle().ItemSpacing.Y);
+    }
+
+    /// <summary>Live strip: pipeline steps, what is happening now (item by item) and what comes next.</summary>
+    private void DrawActivity(float height)
+    {
+        Ui.BeginCard("activity", height);
+        var steps = p.Steps();
+        var first = true;
+        foreach (var (name, state) in steps)
+        {
+            if (state < 0) continue;
+            if (!first) { ImGui.SameLine(); ImGui.TextColored(Ui.Muted, "›"); ImGui.SameLine(); }
+            first = false;
+            var color = state switch { 1 => Ui.Accent, 2 => Ui.Good, _ => Ui.Muted };
+            Ui.Pill(name, color);
+        }
+        var (now, next) = p.Activity();
+        Ui.Icon(p.Running ? FontAwesomeIcon.Cog : FontAwesomeIcon.InfoCircle, p.Running ? Ui.Accent : Ui.Muted);
+        ImGui.SameLine();
+        ImGui.PushStyleColor(ImGuiCol.Text, p.Running ? Ui.Text : Ui.Muted);
+        ImGui.TextWrapped(now);
+        ImGui.PopStyleColor();
+        if (next.Count > 0)
+        {
+            ImGui.PushStyleColor(ImGuiCol.Text, Ui.Muted);
+            ImGui.TextWrapped("Дальше: " + string.Join("  ›  ", next));
+            ImGui.PopStyleColor();
+        }
+        Ui.EndCard();
     }
 
     private void DrawNode(TreeNode n, ref int index)

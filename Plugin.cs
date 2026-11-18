@@ -73,7 +73,10 @@ public enum Route
 }
 
 /// <summary>A raw material of the cart with its possible and chosen route.</summary>
-public sealed record Material(uint ItemId, string Name, int Have, int Missing, IReadOnlyList<Route> Options, Route Route, bool Chosen);
+/// <param name="Price">Vulcan's vendor offer ("7 Ixali Oaknot · Ixali vendor"), null when no vendor.</param>
+/// <param name="Affordable">Whether the currency for <see cref="Missing"/> units is there (beast tribe, GC, scrips…).</param>
+public sealed record Material(uint ItemId, string Name, int Have, int Missing, IReadOnlyList<Route> Options, Route Route, bool Chosen,
+                              string? Price = null, bool Affordable = true, string? Shortage = null);
 
 [Serializable]
 public sealed class CartEntry
@@ -284,15 +287,47 @@ public sealed class Plugin : IDalamudPlugin
         return options;
     }
 
-    /// <summary>The chosen route if it is still possible, otherwise the first of gather → gemstones → vendor → by hand.</summary>
-    internal Route RouteOf(uint itemId)
+    /// <summary>
+    /// The chosen route if it is still possible, otherwise the first of gather → gemstones → vendor → by hand.
+    /// A vendor whose currency is short (no beast tribe currency, too few GC seals…) is skipped by "auto".
+    /// </summary>
+    internal Route RouteOf(uint itemId, int missing = 0)
     {
         var options = RouteOptions(itemId);
-        return Config.Routes.TryGetValue(itemId, out var r) && options.Contains(r) ? r : options[0];
+        if (Config.Routes.TryGetValue(itemId, out var r) && options.Contains(r)) return r;
+        foreach (var o in options)
+        {
+            if (o == Route.Vendor && missing > 0 && !CanAfford(itemId, missing, out _)) continue;
+            return o;
+        }
+        return Route.Market;
     }
 
-    private Material MaterialOf(uint itemId, int missing) =>
-        new(itemId, Planner.ItemName(itemId), BagCount(itemId), missing, RouteOptions(itemId), RouteOf(itemId), Config.Routes.ContainsKey(itemId));
+    /// <summary>Whether the currency Vulcan would pay with covers <paramref name="units"/> (gil is always assumed).</summary>
+    internal bool CanAfford(uint itemId, int units, out string? shortage)
+    {
+        shortage = null;
+        if (!IsLoaded(GatherBuddy) || Vulcan.PriceOf(itemId) is not { } price || price.Group == "Gil" || price.Cost == 0) return true;
+        var have = Vulcan.CurrencyHave(price);
+        var need = (long)price.Cost * units;
+        if (have >= need) return true;
+        shortage = $"{price.CurrencyName}: {have}/{need}";
+        return false;
+    }
+
+    private Material MaterialOf(uint itemId, int missing)
+    {
+        var options = RouteOptions(itemId);
+        string? priceText = null, shortage = null;
+        var affordable = true;
+        if (options.Contains(Route.Vendor) && IsLoaded(GatherBuddy) && Vulcan.PriceOf(itemId) is { } price)
+        {
+            priceText = $"{price.Cost} {price.CurrencyName}" + (price.Vendor.Length > 0 ? $" · {price.Vendor}" : "");
+            affordable = CanAfford(itemId, missing, out shortage);
+        }
+        return new(itemId, Planner.ItemName(itemId), BagCount(itemId), missing, options, RouteOf(itemId, missing),
+                   Config.Routes.ContainsKey(itemId), priceText, affordable, shortage);
+    }
 
     internal void SetRoute(uint itemId, Route? route)
     {
@@ -459,6 +494,10 @@ public sealed class Plugin : IDalamudPlugin
 
         if (Plan.Gems + Config.Reserve > Planner.GemCap)
             list.Add($"Корзине нужно {Plan.Gems} биколоров, а больше {Planner.GemCap} не носить: разбей корзину на части.");
+
+        var poor = Materials.Where(m => m.Route == Route.Vendor && !m.Affordable).Select(m => $"{m.Name} ({m.Shortage})").ToList();
+        if (poor.Count > 0)
+            list.Add($"Не хватает валюты у вендора (трайба, печати GC, скрипы…): {string.Join(", ", poor)}. Добудь валюту или переключи путь.");
         return list;
     }
 
@@ -832,6 +871,96 @@ public sealed class Plugin : IDalamudPlugin
         else
             SetStatus(Phase.Done, $"Vulcan закончил. Скрафчено: {(done.Count > 0 ? string.Join(", ", done) : "ничего")}. Не скрафчено: {string.Join("; ", failed)}. "
                 + "Следующий запуск докрафтит только недостающее (Include Final Crafts).");
+    }
+
+    // ---------------------------------------------------------------- live activity
+
+    /// <summary>Pipeline steps for the activity strip: name, state (-1 skipped, 0 to do, 1 now, 2 done).</summary>
+    internal List<(string Name, int State)> Steps()
+    {
+        var farmNeeded = Plan.Gems > 0 && Gems < Target;
+        var steps = new List<(string, int)>
+        {
+            ("Фарм биколоров", Phase is Phase.Preparing or Phase.Farming or Phase.Stopping && afterStop == Phase.Buying ? 1
+                : Phase is Phase.Buying or Phase.AfgBuying or Phase.Crafting or Phase.Done ? 2 : farmNeeded ? 0 : -1),
+            ("Покупки у вендоров", Phase == Phase.Buying ? 1 : Phase is Phase.AfgBuying or Phase.Crafting or Phase.Done ? 2 : VendorBuys.Count > 0 ? 0 : -1),
+            ("Сбор и крафт", Phase == Phase.Crafting ? 1 : Phase == Phase.Done ? 2 : Config.Cart.Count > 0 ? 0 : -1),
+        };
+        if (Phase is Phase.AfgBuying || (Phase == Phase.Stopping && afterStop == Phase.Crafting))
+            steps.Insert(2, ("Покупка за биколоры (AFG)", 1));
+        return steps;
+    }
+
+    /// <summary>What is happening right now, in detail, and what comes next.</summary>
+    internal (string Now, List<string> Next) Activity()
+    {
+        var next = new List<string>();
+        string ItemList(IEnumerable<VendorBuy> v) => string.Join(", ", v.Select(x => $"{x.Name} ×{Math.Max(0, x.Target - BagCount(x.ItemId))}"));
+        var toBuy = VendorBuys.Where(v => BagCount(v.ItemId) < v.Target).ToList();
+        var crafts = string.Join(", ", EffectiveCart().Select(c => $"{Planner.RecipeName(c.RecipeId)} ×{c.Crafts}"));
+
+        switch (Phase)
+        {
+            case Phase.Preparing:
+                return ("Готовлю фарм: класс и зона в Auto FATE Grind…", Upcoming(toBuy, crafts, ItemList));
+            case Phase.Farming:
+                return ($"Auto FATE Grind фармит FATE{(Zone != null ? " в " + Zone.Zone.Name : "")}: биколоры {Gems}/{Target}.", Upcoming(toBuy, crafts, ItemList));
+            case Phase.Stopping:
+                return ("Auto FATE Grind доделывает текущий FATE и останавливается.", afterStop == Phase.Crafting ? new() { $"Скрафтить: {crafts}" } : Upcoming(toBuy, crafts, ItemList));
+            case Phase.Buying:
+            {
+                var item = Vulcan.ActiveVendorItem();
+                var v = VendorBuys.FirstOrDefault(x => x.ItemId == item);
+                var vs = Vulcan.VendorStatus;
+                var now = v != null
+                    ? $"Vulcan покупает {v.Name} ×{Math.Max(0, v.Target - BagCount(v.ItemId))}" + (Vulcan.PriceOf(v.ItemId) is { } pr && pr.Vendor.Length > 0 ? $" у {pr.Vendor}" : "")
+                    : "Vulcan закупает у вендоров";
+                if (vs.Length > 0) now += $" — {vs}";
+                var rest = toBuy.Where(x => x.ItemId != item).ToList();
+                if (rest.Count > 0) next.Add($"Купить: {ItemList(rest)}");
+                next.Add($"Скрафтить: {crafts}");
+                return (now, next);
+            }
+            case Phase.AfgBuying:
+                return ($"Auto FATE Grind покупает у Gemstone Trader: {ItemList(toBuy.Where(v => v.ForGemstones))}.", new() { $"Скрафтить: {crafts}" });
+            case Phase.Crafting:
+            {
+                var state = Vulcan.CraftingState;
+                var prog = Vulcan.QueueProgress();
+                string now;
+                if (state.Contains("WaitingForGather"))
+                {
+                    var g = VulcanLink.AutoGatherStatus();
+                    now = "Vulcan собирает недостающее" + (g.Length > 0 ? $": {g}" : "…");
+                }
+                else if (state.Contains("Retainer")) now = "Vulcan забирает материалы у ретейнеров.";
+                else if (state.Contains("JobSwitch")) now = "Vulcan меняет класс для следующего рецепта.";
+                else if (state.Contains("Raphael")) now = "Vulcan считает решение крафта (Raphael).";
+                else if (state.Contains("Repair")) now = "Vulcan чинит снаряжение.";
+                else if (prog is { Recipe: not 0 } pr)
+                    now = $"Vulcan крафтит {Planner.RecipeName(pr.Recipe)} {pr.Done}/{pr.Total}";
+                else now = "Vulcan: " + (state.Length > 0 ? state : "запускается…");
+                if (prog is { } p2 && p2.Count > 0) now += $" · позиция очереди {Math.Min(p2.Index + 1, p2.Count)}/{p2.Count}";
+                var left = EffectiveCart().Where(c => prog == null || c.RecipeId != prog.Value.Recipe)
+                                          .Select(c => Planner.RecipeName(c.RecipeId)).ToList();
+                if (left.Count > 0) next.Add($"Ещё в очереди: {string.Join(", ", left)}");
+                return (now, next);
+            }
+            case Phase.Done:
+            case Phase.Failed:
+                return (Status, Upcoming(toBuy, crafts, ItemList, Plan.Gems > 0 && Gems < Target));
+            default:
+                return ("Ничего не запущено.", Upcoming(toBuy, crafts, ItemList, Plan.Gems > 0 && Gems < Target));
+        }
+    }
+
+    private List<string> Upcoming(List<VendorBuy> toBuy, string crafts, Func<IEnumerable<VendorBuy>, string> list, bool farm = false)
+    {
+        var next = new List<string>();
+        if (farm) next.Add($"Нафармить биколоры{(Zone != null ? " в " + Zone.Zone.Name : "")}: {Gems}/{Target}");
+        if (toBuy.Count > 0) next.Add($"Купить: {list(toBuy)}");
+        if (crafts.Length > 0) next.Add($"Скрафтить: {crafts}");
+        return next;
     }
 
     private static unsafe bool IsIdle()
