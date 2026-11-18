@@ -63,6 +63,8 @@ public sealed class Configuration : IPluginConfiguration
     public int GcMaxRuns { get; set; } = 10;
     /// <summary>Give Hunter at most this many minutes for the mob drops.</summary>
     public int MobFarmMaxMinutes { get; set; } = 60;
+    /// <summary>During the mob farm, set RSR's Engage to "all targets in range" for the farm job, so it starts fights itself.</summary>
+    public bool RsrEngageAll { get; set; } = true;
 }
 
 /// <summary>How a raw material is obtained.</summary>
@@ -143,6 +145,15 @@ public sealed class Plugin : IDalamudPlugin
     internal readonly HunterLink Hunter = new();
     private readonly Lumina.Excel.ExcelSheet<Item> englishItems;
     private List<VendorBuy> mobFarm = new();
+    private readonly RsrEngage rsr = new();
+    private bool rsrChecked;
+
+    private string CurrentJobAbbr() => Jobs.Get(Jobs.CurrentJob())?.Abbr ?? "";
+
+    private void RestoreRsr()
+    {
+        if (rsr.Restore(CurrentJobAbbr()) is { } note) Print(note);
+    }
     private DateTime mobIdleSince = DateTime.MinValue;
 
     /// <summary>English item name (Hunter's mob database uses English names).</summary>
@@ -209,6 +220,7 @@ public sealed class Plugin : IDalamudPlugin
         afg.Restore();
         if (Phase == Phase.MobFarming) Hunter.SetAutoHunt(false);
         Hunter.Restore();
+        RestoreRsr();
         if (artisanTurnedOff && Config.ReenableArtisan) Vulcan.SetArtisan(true);
         Pi.UiBuilder.Draw -= windows.Draw;
         Pi.UiBuilder.OpenMainUi -= OpenWindow;
@@ -603,7 +615,7 @@ public sealed class Plugin : IDalamudPlugin
         if (Farming) Run("/afg stop");
         if (Phase == Phase.Buying) Vulcan.StopVendor();
         if (Phase == Phase.GcFarming) Run("/autoduty stop");
-        if (Phase == Phase.MobFarming) { Hunter.SetAutoHunt(false); Hunter.Restore(); }
+        if (Phase == Phase.MobFarming) { Hunter.SetAutoHunt(false); Hunter.Restore(); RestoreRsr(); }
         if (Phase == Phase.Crafting) Vulcan.StopCrafting();
         afg.Restore();
         RestoreArtisan();
@@ -838,11 +850,18 @@ public sealed class Plugin : IDalamudPlugin
         EquipFarmJob(forDungeons: true);
         phaseStartedAt = DateTime.UtcNow;
         mobIdleSince = DateTime.MinValue;
+        rsrChecked = false;
         SetStatus(Phase.MobFarming, $"Hunter фармит мобов: {string.Join(", ", mobFarm.Select(v => $"{v.Name} ×{v.Units}"))}.");
     }
 
     private void TickMobFarming(DateTime now)
     {
+        // Once the farm job is on (gearset swap takes a moment), let RSR pull fresh mobs: Hunter only targets and waits.
+        if (!rsrChecked && now - phaseStartedAt > TimeSpan.FromSeconds(3))
+        {
+            rsrChecked = true;
+            if (Config.RsrEngageAll && rsr.Allow(CurrentJobAbbr()) is { } note) Print(note);
+        }
         var left = mobFarm.Where(v => BagCount(v.ItemId) < v.Target).ToList();
         var hs = Hunter.Status();
         Status = left.Count == 0 ? "Дроп собран, жду, пока Hunter закончит."
@@ -866,6 +885,7 @@ public sealed class Plugin : IDalamudPlugin
         }
         if (!IsIdle()) return;
         Hunter.Restore();
+        RestoreRsr();
         if (left.Count > 0 && !timedOut)
             Print($"Hunter остановился, а собрано не всё: {string.Join(", ", left.Select(v => $"{v.Name} {BagCount(v.ItemId)}/{v.Target}"))}.");
         EnterCrafting();

@@ -723,6 +723,9 @@ public sealed class MainWindow : Window
             ImGui.SetNextItemWidth(120);
             var mins = c.MobFarmMaxMinutes;
             if (ImGui.InputInt("Максимум минут на дроп", ref mins)) { c.MobFarmMaxMinutes = Math.Clamp(mins, 5, 600); p.SaveConfig(); }
+            var engage = c.RsrEngageAll;
+            if (ImGui.Checkbox("На время фарма: RSR Engage = все цели в радиусе", ref engage)) { c.RsrEngageAll = engage; p.SaveConfig(); }
+            ImGui.TextColored(Ui.Muted, "Hunter сам не бьёт: он ставит /rsr auto, берёт моба в цель и ждёт. С «Engage» по умолчанию (все цели только в данже) RSR в открытом мире свежего моба не трогает. Прежнее значение возвращается после фарма.");
             ImGui.TextColored(Ui.Muted, "Путь «Фарм мобов» появляется у предметов из базы мобов Hunter. На время запуска его список «CraftMeThis» — единственный включённый; твои списки потом включаются обратно. Hunter нужны vnavmesh, Rotation Solver Reborn и Lifestream.");
             Ui.EndCard();
         }
