@@ -16,18 +16,24 @@ CraftMeThis plans the run, picks the farm zone and job, keeps track of everythin
    - *gather/fish*: Vulcan's queue gathers it;
    - *Bicolor*: Gemstone Trader, paid with gemstones that AFG farms;
    - *vendor*: Vulcan's vendor buy list (gil, Grand Company seals, beast tribe currencies, scrips…);
+   - *GC seal farm*: for Grand Company items when the seals are short — AutoDuty runs dungeons and turns the loot in;
    - *by hand*: market board or mob drops.
 
-   "Auto" picks gather → gemstones → vendor → by hand. A vendor whose currency is short (no beast tribe currency,
-   not enough GC seals…) is skipped. Each material can be switched by hand on the **Materials** tab.
+   "Auto" picks gather → gemstones → vendor → GC seal farm → by hand. A vendor whose currency is short (no beast
+   tribe currency, not enough GC seals…) is skipped; for GC items the seal farm is chosen instead. Each material can be switched by hand on the **Materials** tab.
 3. **Farm** (only if gemstones are short). Equip the first suitable job from the priority list, set the farm zone (the
    zone whose Gemstone Trader sells the materials) in AFG, and turn off AFG's level filter and its own purchases.
    Then `/afg start`, and `/afg stop soft` once there are enough gemstones.
-4. **Buy.** Vulcan runs the "CraftMeThis" vendor buy list. If it fails to buy a gemstone item (seen with the
+4. **GC seals** (only if a GC purchase is short of seals and AutoDuty is loaded). Like the job-leveling SND script:
+   equip the highest job from the priority list, `/autoduty cfg leveling <Support|Trust_Solo|Trust_Group>`,
+   `/autoduty run 1` (leveling mode picks the highest dungeon for the level), wait for the duty to end,
+   `/autoduty gcturnin` (expert delivery; needs GC rank 6+ and AutoRetainer), `/autoduty autoequip`. This repeats
+   until the seals cover the GC purchases or the run limit (default 10) is reached.
+5. **Buy.** Vulcan runs the "CraftMeThis" vendor buy list. If it fails to buy a gemstone item (seen with the
    Tuliyollal trader: "Timed out opening … special shop"), AFG's own trader hand-off buys it instead.
-5. **Craft.** Turn Artisan off (Vulcan does not craft while it is loaded), run Vulcan's gather + craft queue on the
+6. **Craft.** Turn Artisan off (Vulcan does not craft while it is loaded), run Vulcan's gather + craft queue on the
    "CraftMeThis" list ("Skip if Already Have Enough" on), then turn Artisan back on.
-6. **Report.** List what was crafted and what was not, with the ingredients that were missing. After a run with gaps,
+7. **Report.** List what was crafted and what was not, with the ingredients that were missing. After a run with gaps,
    **resume mode** turns on: Vulcan's "Include Final Crafts" is set, so the next run only crafts what is still missing.
 
 All changes to AFG settings (zones, class queue, level filter, shopping list, trade settings) are restored when the
@@ -69,7 +75,7 @@ Teamcraft amounts are items, so they are converted to crafts using the recipe yi
 
 ## Requirements and limits
 
-- GatherBuddy Reborn (tested with 7.5.6.1) and, when gemstones are needed, Auto FATE Grind (2.24).
+- GatherBuddy Reborn (tested with 7.5.6.1); Auto FATE Grind (2.24) when gemstones are needed; AutoDuty (0.0.0.399) for GC seals.
 - Neither of them has IPC for this. CraftMeThis calls Vulcan's `VendorBuyListManager`, `CraftingListManager` and
   `CraftingGatherBridge`, and edits AFG's `Plugin.Cfg`, all through reflection. An update of either plugin can break
   that part; the plugin then reports which part failed.
@@ -87,7 +93,7 @@ https://github.com/Amletick/CraftMeThis/releases/latest/download/repo.json
 ## Release
 
 ```
-python publish.py 0.11.0
+python publish.py 0.12.0
 ```
 
 This builds the plugin, bumps the version, pushes and creates a GitHub release with `latest.zip` and `repo.json`.

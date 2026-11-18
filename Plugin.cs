@@ -57,6 +57,10 @@ public sealed class Configuration : IPluginConfiguration
     public bool ResumeFinals { get; set; }
     /// <summary>How each raw material is obtained, chosen on the Materials tab (missing = automatic).</summary>
     public Dictionary<uint, Route> Routes { get; set; } = new();
+    /// <summary>AutoDuty leveling mode for GC seal farming: Support, Trust_Solo or Trust_Group.</summary>
+    public string GcLevelingMode { get; set; } = "Support";
+    /// <summary>At most this many dungeon runs per GC seal farm.</summary>
+    public int GcMaxRuns { get; set; } = 10;
 }
 
 /// <summary>How a raw material is obtained.</summary>
@@ -70,6 +74,8 @@ public enum Route
     Vendor,
     /// <summary>Market board, drops or anything else: left to the player.</summary>
     Market,
+    /// <summary>Grand Company seals farmed with AutoDuty (dungeons + expert delivery), then Vulcan buys.</summary>
+    GcFarm,
 }
 
 /// <summary>A raw material of the cart with its possible and chosen route.</summary>
@@ -85,7 +91,7 @@ public sealed class CartEntry
     public int Crafts { get; set; }
 }
 
-public enum Phase { Idle, Preparing, Farming, Stopping, Buying, AfgBuying, Crafting, Done, Failed }
+public enum Phase { Idle, Preparing, Farming, Stopping, GcFarming, Buying, AfgBuying, Crafting, Done, Failed }
 
 /// <summary>A material Vulcan will buy from a vendor: target is the bag count to reach.</summary>
 public sealed record VendorBuy(uint ItemId, string Name, int Units, int Target, bool ForGemstones);
@@ -129,7 +135,8 @@ public sealed class Plugin : IDalamudPlugin
     internal List<string> Warnings { get; } = new();
     internal ZoneChoice? Zone { get; private set; }
 
-    internal bool Running => Phase is Phase.Preparing or Phase.Farming or Phase.Stopping or Phase.Buying or Phase.AfgBuying or Phase.Crafting;
+    internal bool Running => Phase is Phase.Preparing or Phase.Farming or Phase.Stopping or Phase.GcFarming or Phase.Buying or Phase.AfgBuying or Phase.Crafting;
+    internal GcFarm Gc { get; private set; } = null!;
     private bool Farming => Phase is Phase.Preparing or Phase.Farming or Phase.Stopping or Phase.AfgBuying;
 
     /// <summary>What follows once Auto FATE Grind has stopped: the vendor run, or crafting (after AFG bought the gemstone items).</summary>
@@ -167,6 +174,7 @@ public sealed class Plugin : IDalamudPlugin
             Data.GetSubrowExcelSheet<GilShopItem>());
         Jobs.Normalize(Config.Jobs);
 
+        Gc = new GcFarm(this);
         window = new MainWindow(this);
         windows.AddWindow(window);
         Pi.UiBuilder.Draw += windows.Draw;
@@ -261,7 +269,7 @@ public sealed class Plugin : IDalamudPlugin
             .Concat(Plan.Leaves.Select(kv => MaterialOf(kv.Key, kv.Value)))
             .OrderBy(m => m.Route).ThenByDescending(m => m.Missing).ToList();
         VendorBuys = Plan.Purchases.Select(p => new VendorBuy(p.ItemId, p.Name, p.Units, BagCount(p.ItemId) + p.Units, true)).ToList();
-        foreach (var m in Materials.Where(m => m.Route == Route.Vendor))
+        foreach (var m in Materials.Where(m => m.Route is Route.Vendor or Route.GcFarm))
             VendorBuys.Add(new VendorBuy(m.ItemId, m.Name, m.Missing, m.Have + m.Missing, false));
 
         Zone = Config.ZoneOverride != 0 && Zones.Get(Config.ZoneOverride) is { } manual
@@ -283,6 +291,8 @@ public sealed class Plugin : IDalamudPlugin
         if (src is Source.Gather or Source.Fish) options.Add(Route.Gather);
         if (Planner.HasGemOffer(itemId)) options.Add(Route.Bicolor);
         if (src == Source.Vendor || (!Planner.HasGemOffer(itemId) && IsLoaded(GatherBuddy) && Vulcan.CanBuy(itemId))) options.Add(Route.Vendor);
+        // Sold for Grand Company seals: the seals can be farmed with AutoDuty first.
+        if (options.Contains(Route.Vendor) && IsLoaded(GatherBuddy) && Vulcan.PriceOf(itemId)?.Group == "GrandCompanySeals") options.Add(Route.GcFarm);
         options.Add(Route.Market);
         return options;
     }
@@ -342,6 +352,7 @@ public sealed class Plugin : IDalamudPlugin
         Route.Gather => "Сбор",
         Route.Bicolor => "Биколоры",
         Route.Vendor => "Вендор",
+        Route.GcFarm => "Фарм печатей GC",
         _ => "Рынок / вручную",
     };
 
@@ -511,6 +522,7 @@ public sealed class Plugin : IDalamudPlugin
             return;
         }
         Recalculate();
+        Gc = new GcFarm(this);
         if (Config.Cart.Count == 0)
         {
             SetStatus(Phase.Idle, "Корзина пуста: импортируй список на вкладке «Корзина».");
@@ -573,6 +585,7 @@ public sealed class Plugin : IDalamudPlugin
     {
         if (Farming) Run("/afg stop");
         if (Phase == Phase.Buying) Vulcan.StopVendor();
+        if (Phase == Phase.GcFarming) Run("/autoduty stop");
         if (Phase == Phase.Crafting) Vulcan.StopCrafting();
         afg.Restore();
         RestoreArtisan();
@@ -582,6 +595,21 @@ public sealed class Plugin : IDalamudPlugin
     private void EnterBuying()
     {
         Recalculate();
+        // Grand Company seals first, if a GC purchase is short of them and AutoDuty can farm them.
+        var (sealsHave, sealsNeed) = GcSeals();
+        if (Config.BuyFromVendors && !Gc.Finished && sealsHave < sealsNeed && Materials.Any(m => m.Route == Route.GcFarm))
+        {
+            if (!IsLoaded("AutoDuty"))
+            {
+                Print("Печатей GC не хватает, а AutoDuty не загружен — покупаю, на что хватает.");
+            }
+            else
+            {
+                Gc.Begin();
+                SetStatus(Phase.GcFarming, $"Фармлю печати GC через AutoDuty: {sealsHave}/{sealsNeed}.");
+                return;
+            }
+        }
         if (!Config.BuyFromVendors || VendorBuys.Count == 0)
         {
             EnterCrafting();
@@ -659,6 +687,11 @@ public sealed class Plugin : IDalamudPlugin
             case Phase.Preparing: TickPreparing(now); break;
             case Phase.Farming: TickFarming(now); break;
             case Phase.Stopping: TickStopping(now); break;
+            case Phase.GcFarming:
+                Gc.Tick(now);
+                Status = Gc.Now;
+                if (Gc.Finished) EnterBuying();
+                break;
             case Phase.Buying: TickBuying(now); break;
             case Phase.AfgBuying: TickAfgBuying(now); break;
             case Phase.Crafting: TickCrafting(now); break;
@@ -883,6 +916,9 @@ public sealed class Plugin : IDalamudPlugin
         {
             ("Фарм биколоров", Phase is Phase.Preparing or Phase.Farming or Phase.Stopping && afterStop == Phase.Buying ? 1
                 : Phase is Phase.Buying or Phase.AfgBuying or Phase.Crafting or Phase.Done ? 2 : farmNeeded ? 0 : -1),
+            ("Фарм печатей GC (AutoDuty)", Phase == Phase.GcFarming ? 1
+                : Gc.Finished || (Phase is Phase.Buying or Phase.AfgBuying or Phase.Crafting or Phase.Done && Materials.Any(m => m.Route == Route.GcFarm)) ? 2
+                : Materials.Any(m => m.Route == Route.GcFarm) ? 0 : -1),
             ("Покупки у вендоров", Phase == Phase.Buying ? 1 : Phase is Phase.AfgBuying or Phase.Crafting or Phase.Done ? 2 : VendorBuys.Count > 0 ? 0 : -1),
             ("Сбор и крафт", Phase == Phase.Crafting ? 1 : Phase == Phase.Done ? 2 : Config.Cart.Count > 0 ? 0 : -1),
         };
@@ -921,6 +957,11 @@ public sealed class Plugin : IDalamudPlugin
                 next.Add($"Скрафтить: {crafts}");
                 return (now, next);
             }
+            case Phase.GcFarming:
+            {
+                var (h, n) = GcSeals();
+                return ($"{Gc.Now} (печати {h}/{n})", new() { $"Купить: {ItemList(toBuy)}", $"Скрафтить: {crafts}" });
+            }
             case Phase.AfgBuying:
                 return ($"Auto FATE Grind покупает у Gemstone Trader: {ItemList(toBuy.Where(v => v.ForGemstones))}.", new() { $"Скрафтить: {crafts}" });
             case Phase.Crafting:
@@ -958,9 +999,37 @@ public sealed class Plugin : IDalamudPlugin
     {
         var next = new List<string>();
         if (farm) next.Add($"Нафармить биколоры{(Zone != null ? " в " + Zone.Zone.Name : "")}: {Gems}/{Target}");
+        var (sh, sn) = GcSeals();
+        if (sh < sn && Materials.Any(m => m.Route == Route.GcFarm)) next.Add($"Нафармить печати GC через AutoDuty: {sh}/{sn}");
         if (toBuy.Count > 0) next.Add($"Купить: {list(toBuy)}");
         if (crafts.Length > 0) next.Add($"Скрафтить: {crafts}");
         return next;
+    }
+
+    /// <summary>Grand Company seals: (have, needed for the GC purchases still missing).</summary>
+    internal (long Have, long Need) GcSeals()
+    {
+        long need = 0, have = 0;
+        foreach (var v in VendorBuys)
+        {
+            if (Vulcan.PriceOf(v.ItemId) is not { Group: "GrandCompanySeals" } price) continue;
+            need += (long)price.Cost * Math.Max(0, v.Target - BagCount(v.ItemId));
+            have = Vulcan.CurrencyHave(price);
+        }
+        return (have, need);
+    }
+
+    internal void RunCommand(string command) => Run(command);
+
+    internal static bool IsIdleNow() => IsIdle();
+
+    /// <summary>Equips the first enabled job from the priority list (max level first for dungeons).</summary>
+    internal void EquipFarmJob(bool forDungeons)
+    {
+        if (!Config.SwitchJob) return;
+        var pick = forDungeons ? Jobs.Pick(Config.Jobs, 100) ?? Jobs.Pick(Config.Jobs, 1) : null;
+        if (pick is { } j && j.Job.Id != Jobs.CurrentJob() && Jobs.Equip(j.Gearset))
+            Print($"переключаюсь на {j.Job.Abbr} {j.Level} (гирсет {j.Gearset + 1}).");
     }
 
     private static unsafe bool IsIdle()

@@ -95,6 +95,7 @@ public sealed class MainWindow : Window
             Phase.Farming => ("фарм FATE", Ui.Gem),
             Phase.Stopping => ("завершаю FATE", Ui.Warn),
             Phase.Buying => ("покупки", Ui.Accent),
+            Phase.GcFarming => ("фарм печатей GC", Ui.Warn),
             Phase.AfgBuying => ("покупка за биколоры", Ui.Gem),
             Phase.Crafting => ("крафт", Ui.Accent),
             Phase.Done => ("готово", Ui.Good),
@@ -389,6 +390,7 @@ public sealed class MainWindow : Window
         (Route.Gather, "Сбор и рыбалка — Vulcan соберёт во время крафта", FontAwesomeIcon.Leaf),
         (Route.Bicolor, "Биколоры — нафармит AFG, купит Vulcan у Gemstone Trader", FontAwesomeIcon.Gem),
         (Route.Vendor, "Вендор — купит Vulcan (гил, GC, скрипы…)", FontAwesomeIcon.Store),
+        (Route.GcFarm, "Печати GC — AutoDuty бегает данжи и сдаёт шмот в GC, потом купит Vulcan", FontAwesomeIcon.Dungeon),
         (Route.Market, "Рынок / вручную / фарм мобов — сделать самому", FontAwesomeIcon.HandPaper),
     };
 
@@ -397,6 +399,7 @@ public sealed class MainWindow : Window
         Route.Gather => Ui.Good,
         Route.Bicolor => Ui.Gem,
         Route.Vendor => Ui.Accent,
+        Route.GcFarm => Ui.Warn,
         _ => Ui.Warn,
     };
 
@@ -488,6 +491,7 @@ public sealed class MainWindow : Window
         NodeState.Bicolor => (FontAwesomeIcon.Gem, Ui.Gem, "купить за биколоры"),
         NodeState.BicolorFarm => (FontAwesomeIcon.Crosshairs, Ui.Gem, "нафармить и купить"),
         NodeState.Vendor => (FontAwesomeIcon.Store, Ui.Accent, "купит Vulcan"),
+        NodeState.GcFarm => (FontAwesomeIcon.Dungeon, Ui.Warn, "печати GC: AutoDuty"),
         NodeState.Manual => (FontAwesomeIcon.HandPaper, Ui.Warn, "вручную / рынок"),
         _ => (FontAwesomeIcon.TimesCircle, Ui.Bad, "не скрафчено"),
     };
@@ -702,6 +706,23 @@ public sealed class MainWindow : Window
             if (ImGui.Checkbox("…и включать обратно после", ref back)) { c.ReenableArtisan = back; p.SaveConfig(); }
             ImGui.EndDisabled();
             ImGui.TextColored(Ui.Muted, "Vulcan не крафтит, пока загружен Artisan.");
+            Ui.EndCard();
+        }
+        if (Ui.BeginCard("set-gc"))
+        {
+            Ui.Caption("Фарм печатей GC (AutoDuty)");
+            ImGui.SetNextItemWidth(160);
+            if (ImGui.BeginCombo("Режим AutoDuty", c.GcLevelingMode))
+            {
+                foreach (var mode in new[] { "Support", "Trust_Solo", "Trust_Group" })
+                    if (ImGui.Selectable(mode, c.GcLevelingMode == mode)) { c.GcLevelingMode = mode; p.SaveConfig(); }
+                ImGui.EndCombo();
+            }
+            ImGui.SetNextItemWidth(120);
+            var runs = c.GcMaxRuns;
+            if (ImGui.InputInt("Максимум пробегов", ref runs)) { c.GcMaxRuns = Math.Clamp(runs, 1, 100); p.SaveConfig(); }
+            ImGui.TextColored(Ui.Muted, "Режим прокачки AutoDuty берёт самый высокий данж для уровня класса. Класс — первый включённый из приоритетов с гирсетом (сначала 100-го уровня).");
+            ImGui.TextColored(Ui.Muted, "Сдача шмота в GC (/autoduty gcturnin) требует ранг GC 6+ и AutoRetainer.");
             Ui.EndCard();
         }
         if (Ui.BeginCard("set-handoff"))
