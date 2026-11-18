@@ -61,6 +61,8 @@ public sealed class Configuration : IPluginConfiguration
     public string GcLevelingMode { get; set; } = "Support";
     /// <summary>At most this many dungeon runs per GC seal farm.</summary>
     public int GcMaxRuns { get; set; } = 10;
+    /// <summary>Dungeon (territory id) to farm GC seals in; 0 = the highest one AutoDuty allows at the job's level.</summary>
+    public uint GcDutyTerritory { get; set; }
     /// <summary>Give Hunter at most this many minutes for the mob drops.</summary>
     public int MobFarmMaxMinutes { get; set; } = 60;
     /// <summary>During the mob farm, set RSR's Engage to "all targets in range" for the farm job, so it starts fights itself.</summary>

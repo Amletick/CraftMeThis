@@ -25,11 +25,12 @@ CraftMeThis plans the run, picks the farm zone and job, keeps track of everythin
 3. **Farm** (only if gemstones are short). Equip the first suitable job from the priority list, set the farm zone (the
    zone whose Gemstone Trader sells the materials) in AFG, and turn off AFG's level filter and its own purchases.
    Then `/afg start`, and `/afg stop soft` once there are enough gemstones.
-4. **GC seals** (only if a GC purchase is short of seals and AutoDuty is loaded). Like the job-leveling SND script:
-   equip the highest job from the priority list, `/autoduty cfg leveling <Support|Trust_Solo|Trust_Group>`,
-   `/autoduty run <Support|Trust> <territory> 1` with the highest dungeon of AutoDuty's leveling list that its own `CanRun` allows at the job's level (its leveling mode itself refuses level 100), wait for the duty to end,
-   `/autoduty gcturnin` (expert delivery; needs GC rank 6+ and AutoRetainer), `/autoduty autoequip`. This repeats
-   until the seals cover the GC purchases or the run limit (default 10) is reached.
+4. **GC seals** (only if a GC purchase is short of seals and AutoDuty is loaded). Equip the highest job from the
+   priority list, `/autoduty run <Support|Trust> <territory> 1` in the dungeon chosen in the settings (or the highest
+   one AutoDuty's own `CanRun` allows at the job's level — its leveling mode refuses level 100), wait for the duty to
+   end, `/autoduty gcturnin` (AutoRetainer's expert delivery; needs GC rank 6+) and wait for that helper to finish.
+   No auto-equip. Repeat until the seals cover the GC purchases, the run limit is reached, or two turn-ins in a row
+   give no seals.
 5. **Buy.** Vulcan runs the "CraftMeThis" vendor buy list. If it fails to buy a gemstone item (seen with the
    Tuliyollal trader: "Timed out opening … special shop"), AFG's own trader hand-off buys it instead.
 6. **Mob drops** (if any material is on the mob-farm route). A "CraftMeThis" hunt list in Hunter becomes the only

@@ -900,6 +900,8 @@ public sealed class MainWindow : Window
 
     // ---------------------------------------------------------------- settings
 
+    private System.Collections.Generic.List<(uint Territory, string Name, int Level, uint ItemLevel)>? gcDuties;
+
     private void DrawSettings()
     {
         var c = p.Config;
@@ -957,11 +959,24 @@ public sealed class MainWindow : Window
                     if (ImGui.Selectable(mode, c.GcLevelingMode == mode)) { c.GcLevelingMode = mode; p.SaveConfig(); }
                 ImGui.EndCombo();
             }
+            if (gcDuties == null || ImGui.IsWindowAppearing()) gcDuties = GcFarm.AllDuties();
+            var chosen = gcDuties.FirstOrDefault(d => d.Territory == c.GcDutyTerritory);
+            var preview = c.GcDutyTerritory == 0 || chosen.Territory == 0 ? "авто — самый высокий доступный" : $"{chosen.Name} (ур. {chosen.Level}, ilvl {chosen.ItemLevel})";
+            ImGui.SetNextItemWidth(320);
+            if (ImGui.BeginCombo("Данж", preview))
+            {
+                if (ImGui.Selectable("авто — самый высокий доступный", c.GcDutyTerritory == 0)) { c.GcDutyTerritory = 0; p.SaveConfig(); }
+                foreach (var d in gcDuties)
+                    if (ImGui.Selectable($"{d.Name}##{d.Territory}", c.GcDutyTerritory == d.Territory)) { c.GcDutyTerritory = d.Territory; p.SaveConfig(); }
+                    else if (ImGui.IsItemHovered()) ImGui.SetTooltip($"уровень {d.Level}, ilvl {d.ItemLevel}");
+                ImGui.EndCombo();
+            }
+            if (gcDuties.Count == 0) ImGui.TextColored(Ui.Warn, "Список данжей AutoDuty не прочитался (AutoDuty не загружен?) — будет «авто».");
             ImGui.SetNextItemWidth(120);
             var runs = c.GcMaxRuns;
             if (ImGui.InputInt("Максимум пробегов", ref runs)) { c.GcMaxRuns = Math.Clamp(runs, 1, 100); p.SaveConfig(); }
-            ImGui.TextColored(Ui.Muted, "Данж — самый высокий из списка прокачки AutoDuty, который он пускает на уровне класса (на 100-м тоже), запуск /autoduty run <Support|Trust> <данж> 1. Класс — первый включённый из приоритетов с гирсетом (сначала 100-го уровня).");
-            ImGui.TextColored(Ui.Muted, "Сдача шмота в GC (/autoduty gcturnin) требует ранг GC 6+ и AutoRetainer.");
+            ImGui.TextColored(Ui.Muted, "Пробег: /autoduty run <Support|Trust> <данж> 1 → сдача лута в GC → следующий пробег. Без автоэкипировки. Если выбранный данж недоступен на уровне класса — берётся самый высокий доступный. Более низкий данж бывает быстрее.");
+            ImGui.TextColored(Ui.Muted, "Сдача (/autoduty gcturnin) идёт через AutoRetainer: нужен ранг GC 6+ и разрешённая сдача шмота в его Expert Delivery. Две сдачи подряд без печатей останавливают фарм.");
             Ui.EndCard();
         }
         if (Ui.BeginCard("set-handoff"))

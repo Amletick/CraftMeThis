@@ -1,4 +1,5 @@
 using System;
+using System.Collections.Generic;
 using System.Linq;
 using System.Reflection;
 using Dalamud.Game.ClientState.Conditions;
@@ -6,29 +7,35 @@ using Dalamud.Game.ClientState.Conditions;
 namespace CraftMeThis;
 
 /// <summary>
-/// Grand Company seal farming through AutoDuty, the way the user's job-leveling SND script drives it:
-/// "/autoduty cfg leveling &lt;mode&gt;" + "/autoduty run 1" (leveling mode picks the highest dungeon the job can do),
-/// wait for the duty to end, "/autoduty gcturnin" (expert delivery of the looted gear; needs GC rank 6+ and AutoRetainer),
-/// "/autoduty autoequip", then again until the seals cover the GC purchases or the run limit is reached.
+/// Grand Company seal farming through AutoDuty: run a dungeon ("/autoduty run Support|Trust &lt;territory&gt; 1"),
+/// wait for it to end, "/autoduty gcturnin" (AutoDuty walks to the GC and AutoRetainer does the expert delivery;
+/// needs GC rank 6+), wait for that helper to finish, then again until the seals cover the GC purchases, the run limit
+/// is reached, or turn-ins stop giving seals. No auto-equip: this is a farm, not leveling.
 /// </summary>
 public sealed class GcFarm
 {
-    private enum Step { Equip, Run, WaitEnter, InDuty, TurnIn, AutoEquip, Check }
+    private enum Step { Equip, Run, WaitEnter, InDuty, TurnIn, Check }
+
+    private const BindingFlags AnyStatic = BindingFlags.Static | BindingFlags.Public | BindingFlags.NonPublic;
 
     private readonly Plugin p;
     private Step step;
     private DateTime stepAt;
     private bool helperSeenRunning;
+    private long sealsBeforeTurnIn;
+    private int emptyTurnIns;
 
     public int Runs { get; private set; }
     public string Now { get; private set; } = "";
     public bool Finished { get; private set; }
+    public string LastDuty { get; private set; } = "";
 
     public GcFarm(Plugin plugin) => p = plugin;
 
     public void Begin()
     {
         Runs = 0;
+        emptyTurnIns = 0;
         Finished = false;
         Go(Step.Equip, "Готовлю класс для данжей…");
     }
@@ -48,23 +55,26 @@ public sealed class GcFarm
         Plugin.Chat.Print($"[CraftMeThis] {why}");
     }
 
+    // ---------------------------------------------------------------- AutoDuty data (reflection)
+
+    private static Assembly? AutoDutyAssembly() => PluginFinder.FindPluginInstance("AutoDuty")?.GetType().Assembly;
+
     /// <summary>
-    /// The highest dungeon of AutoDuty's own leveling list that its CanRun check allows at this level
-    /// (AutoDuty.Helpers.LevelingHelper.LevelingDuties + ContentHelper.CanRun), read through reflection.
+    /// Dungeons of AutoDuty's leveling list that its own CanRun check allows at this level, highest first
+    /// (AutoDuty.Helpers.LevelingHelper.LevelingDuties + ContentHelper.CanRun). Its leveling mode itself refuses level 100.
     /// </summary>
-    public static (uint Territory, string Name)? HighestDuty(int level, bool trust, out string why)
+    public static List<(uint Territory, string Name)> RunnableDuties(int level, bool trust, out string why)
     {
         why = "";
+        var list = new List<(uint, string)>();
         try
         {
-            var inst = PluginFinder.FindPluginInstance("AutoDuty");
-            if (inst == null) { why = "AutoDuty не загружен"; return null; }
-            var asm = inst.GetType().Assembly;
-            const BindingFlags any = BindingFlags.Static | BindingFlags.Public | BindingFlags.NonPublic;
-            var duties = asm.GetType("AutoDuty.Helpers.LevelingHelper")?.GetProperty("LevelingDuties", any)?.GetValue(null) as Array;
-            var canRun = asm.GetType("AutoDuty.Helpers.ContentHelper")?.GetMethods(any).FirstOrDefault(m => m.Name == "CanRun");
+            var asm = AutoDutyAssembly();
+            if (asm == null) { why = "AutoDuty не загружен"; return list; }
+            var duties = asm.GetType("AutoDuty.Helpers.LevelingHelper")?.GetProperty("LevelingDuties", AnyStatic)?.GetValue(null) as Array;
+            var canRun = asm.GetType("AutoDuty.Helpers.ContentHelper")?.GetMethods(AnyStatic).FirstOrDefault(m => m.Name == "CanRun");
             var modeType = asm.GetType("AutoDuty.Data.Enums+DutyMode");
-            if (duties == null || canRun == null || modeType == null) { why = "у AutoDuty не нашёл список данжей — возможно, изменилась его версия"; return null; }
+            if (duties == null || canRun == null || modeType == null) { why = "у AutoDuty не нашёл список данжей — возможно, изменилась его версия"; return list; }
             var mode = Enum.Parse(modeType, trust ? "Trust" : "None");
             var ps = canRun.GetParameters();
             for (var i = duties.Length - 1; i >= 0; i--)
@@ -80,14 +90,61 @@ public sealed class GcFarm
                 var t = c.GetType();
                 var tt = t.GetProperty("TerritoryType", BindingFlags.Instance | BindingFlags.Public)?.GetValue(c) is uint u ? u : 0;
                 var name = t.GetProperty("Name", BindingFlags.Instance | BindingFlags.Public)?.GetValue(c) as string ?? $"#{tt}";
-                if (tt != 0) return (tt, name);
+                if (tt != 0) list.Add((tt, name));
             }
-            why = $"ни один данж из списка прокачки AutoDuty не проходит на уровне {level}";
-            return null;
+            if (list.Count == 0) why = $"ни один данж из списка AutoDuty не проходит на уровне {level}";
         }
         catch (Exception ex)
         {
             why = (ex as TargetInvocationException)?.InnerException?.Message ?? ex.Message;
+        }
+        return list;
+    }
+
+    /// <summary>
+    /// All dungeons of AutoDuty's leveling list with their level and item level (for the settings combo; CanRun is not
+    /// used here because it rejects everything while a crafter is equipped).
+    /// </summary>
+    public static List<(uint Territory, string Name, int Level, uint ItemLevel)> AllDuties()
+    {
+        var list = new List<(uint, string, int, uint)>();
+        try
+        {
+            if (AutoDutyAssembly()?.GetType("AutoDuty.Helpers.LevelingHelper")?.GetProperty("LevelingDuties", AnyStatic)?.GetValue(null) is not Array duties)
+                return list;
+            foreach (var c in duties)
+            {
+                if (c == null) continue;
+                var t = c.GetType();
+                var pub = BindingFlags.Instance | BindingFlags.Public;
+                var tt = t.GetProperty("TerritoryType", pub)?.GetValue(c) is uint u ? u : 0;
+                var name = t.GetProperty("Name", pub)?.GetValue(c) as string ?? $"#{tt}";
+                var lvl = t.GetProperty("ClassJobLevelRequired", pub)?.GetValue(c) is byte b ? b : 0;
+                var ilvl = t.GetProperty("ItemLevelRequired", pub)?.GetValue(c) is uint il ? il : 0;
+                if (tt != 0) list.Add((tt, name, lvl, ilvl));
+            }
+        }
+        catch
+        {
+            // AutoDuty missing or changed: empty list, the run falls back to "highest"
+        }
+        return list.OrderByDescending(d => d.Item3).ThenByDescending(d => d.Item4).ToList();
+    }
+
+    /// <summary>
+    /// Is AutoDuty's GC turn-in helper running? (ActiveHelperBase&lt;GCTurninHelper, …&gt;.State == Running).
+    /// null when it cannot be read; then "AutoDuty stopped + character idle" is used instead.
+    /// </summary>
+    private static bool? TurnInRunning()
+    {
+        try
+        {
+            var baseType = AutoDutyAssembly()?.GetType("AutoDuty.Helpers.GCTurninHelper")?.BaseType;
+            var state = baseType?.GetField("State", AnyStatic)?.GetValue(null);
+            return state == null ? null : state.ToString() == "Running";
+        }
+        catch
+        {
             return null;
         }
     }
@@ -101,16 +158,21 @@ public sealed class GcFarm
     private static bool InDuty => Plugin.Condition[ConditionFlag.BoundByDuty] || Plugin.Condition[ConditionFlag.BoundByDuty56]
                                   || Plugin.Condition[ConditionFlag.BetweenAreas] || Plugin.Condition[ConditionFlag.BetweenAreas51];
 
-    /// <summary>Waits for an AutoDuty helper (gcturnin, autoequip): first for it to start, then for it to finish.</summary>
-    private bool HelperDone(TimeSpan timeout, DateTime now)
+    /// <summary>Waits for the turn-in helper: first for it to start (it walks to the GC first), then for it to finish.</summary>
+    private bool TurnInDone(DateTime now)
     {
-        if (!AutoDutyStopped()) helperSeenRunning = true;
-        if (!helperSeenRunning && now - stepAt < TimeSpan.FromSeconds(15)) return false;
-        if (AutoDutyStopped() && Plugin.IsIdleNow()) return true;
-        if (now - stepAt <= timeout) return false;
+        var running = TurnInRunning();
+        if (running == true || (running == null && !AutoDutyStopped())) helperSeenRunning = true;
+        if (!helperSeenRunning)
+            return now - stepAt > TimeSpan.FromSeconds(30) && Plugin.IsIdleNow(); // never started (nothing to hand in?)
+        var finished = running == null ? AutoDutyStopped() : running == false;
+        if (finished && Plugin.IsIdleNow()) return true;
+        if (now - stepAt <= TimeSpan.FromMinutes(15)) return false;
         p.RunCommand("/autoduty stop");
         return true;
     }
+
+    // ---------------------------------------------------------------- loop
 
     public void Tick(DateTime now)
     {
@@ -127,26 +189,32 @@ public sealed class GcFarm
             case Step.Run:
             {
                 if (now - stepAt < TimeSpan.FromSeconds(3)) return;
-                // AutoDuty's leveling mode refuses level 100 ("lvl >= 100 → no leveling duty") and then
-                // "/autoduty run 1" fails, so the duty is picked here the same way and started explicitly.
                 var trust = p.Config.GcLevelingMode.StartsWith("Trust", StringComparison.OrdinalIgnoreCase);
-                var duty = HighestDuty(p.CurrentJobLevel(), trust, out var why);
-                if (duty == null)
+                var duties = RunnableDuties(p.CurrentJobLevel(), trust, out var why);
+                if (duties.Count == 0)
                 {
                     Finish($"Не нашёл данж для AutoDuty ({why}). Фарм печатей остановлен — покупаю, на что хватает.");
                     return;
                 }
+                // The dungeon chosen in the settings if it can be run at this level, otherwise the highest one.
+                var duty = duties.FirstOrDefault(d => d.Territory == p.Config.GcDutyTerritory);
+                if (duty.Territory == 0)
+                {
+                    if (p.Config.GcDutyTerritory != 0) Plugin.Chat.Print("[CraftMeThis] Выбранный данж сейчас недоступен (уровень/режим) — беру самый высокий.");
+                    duty = duties[0];
+                }
                 var mode = trust ? "Trust" : "Support";
-                p.RunCommand($"/autoduty run {mode} {duty.Value.Territory} 1");
+                LastDuty = duty.Name;
+                p.RunCommand($"/autoduty run {mode} {duty.Territory} 1");
                 Runs++;
-                Go(Step.WaitEnter, $"Пробег {Runs}: {duty.Value.Name} ({mode}) — жду входа…");
+                Go(Step.WaitEnter, $"Пробег {Runs}: {duty.Name} ({mode}) — жду входа…");
                 return;
             }
 
             case Step.WaitEnter:
-                if (InDuty) { Go(Step.InDuty, $"Пробег {Runs}/{p.Config.GcMaxRuns}: AutoDuty проходит данж. Печати {have}/{need}."); return; }
+                if (InDuty) { Go(Step.InDuty, $"Пробег {Runs}/{p.Config.GcMaxRuns}: {LastDuty}. Печати {have}/{need}."); return; }
                 if (now - stepAt > TimeSpan.FromSeconds(30) && AutoDutyStopped() && Plugin.IsIdleNow())
-                    Finish("AutoDuty не смог зайти в данж (нет подходящего для уровня, режим или ilvl). Фарм печатей остановлен — покупаю, на что хватает.");
+                    Finish("AutoDuty не смог зайти в данж (уровень, режим или ilvl). Фарм печатей остановлен — покупаю, на что хватает.");
                 else if (now - stepAt > TimeSpan.FromMinutes(15))
                 {
                     p.RunCommand("/autoduty stop");
@@ -155,7 +223,7 @@ public sealed class GcFarm
                 return;
 
             case Step.InDuty:
-                Now = $"Пробег {Runs}/{p.Config.GcMaxRuns}: AutoDuty проходит данж. Печати {have}/{need}.";
+                Now = $"Пробег {Runs}/{p.Config.GcMaxRuns}: {LastDuty}. Печати {have}/{need}.";
                 if (InDuty || !AutoDutyStopped() || !Plugin.IsIdleNow())
                 {
                     if (now - stepAt > TimeSpan.FromMinutes(60))
@@ -165,26 +233,36 @@ public sealed class GcFarm
                     }
                     return;
                 }
+                sealsBeforeTurnIn = have;
                 p.RunCommand("/autoduty gcturnin");
                 Go(Step.TurnIn, $"Пробег {Runs}: сдаю лут в Grand Company…");
                 return;
 
             case Step.TurnIn:
-                if (!HelperDone(TimeSpan.FromMinutes(15), now)) return;
-                p.RunCommand("/autoduty autoequip");
-                Go(Step.AutoEquip, $"Пробег {Runs}: надеваю лучшее после сдачи…");
-                return;
-
-            case Step.AutoEquip:
-                if (!HelperDone(TimeSpan.FromMinutes(2), now)) return;
+                if (!TurnInDone(now)) return;
                 Go(Step.Check, "");
                 return;
 
             case Step.Check:
+            {
+                // Give the seal count a moment to update after the delivery window closes.
+                if (now - stepAt < TimeSpan.FromSeconds(3)) return;
+                var gained = have - sealsBeforeTurnIn;
+                if (gained <= 0)
+                {
+                    emptyTurnIns++;
+                    Plugin.Chat.Print($"[CraftMeThis] Сдача в GC не принесла печатей (пробег {Runs}). Проверь в AutoRetainer → Expert Delivery, что разрешена сдача этого шмота, и что ранг GC 6+.");
+                    if (emptyTurnIns >= 2) { Finish("Две сдачи подряд без печатей — фарм печатей остановлен, покупаю, на что хватает."); return; }
+                }
+                else
+                {
+                    emptyTurnIns = 0;
+                }
                 if (have >= need) { Finish($"Печатей хватает ({have}/{need}) после {Runs} пробег(ов)."); return; }
                 if (Runs >= p.Config.GcMaxRuns) { Finish($"Сделано {Runs} пробегов (лимит), печатей {have}/{need}. Покупаю, на что хватает."); return; }
-                Go(Step.Run, $"Печатей {have}/{need} — ещё пробег.");
+                Go(Step.Run, $"+{Math.Max(0, gained)} печатей, всего {have}/{need} — ещё пробег.");
                 return;
+            }
         }
     }
 }
