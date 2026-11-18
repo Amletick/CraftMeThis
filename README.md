@@ -27,7 +27,7 @@ CraftMeThis plans the run, picks the farm zone and job, keeps track of everythin
    Then `/afg start`, and `/afg stop soft` once there are enough gemstones.
 4. **GC seals** (only if a GC purchase is short of seals and AutoDuty is loaded). Like the job-leveling SND script:
    equip the highest job from the priority list, `/autoduty cfg leveling <Support|Trust_Solo|Trust_Group>`,
-   `/autoduty run 1` (leveling mode picks the highest dungeon for the level), wait for the duty to end,
+   `/autoduty run <Support|Trust> <territory> 1` with the highest dungeon of AutoDuty's leveling list that its own `CanRun` allows at the job's level (its leveling mode itself refuses level 100), wait for the duty to end,
    `/autoduty gcturnin` (expert delivery; needs GC rank 6+ and AutoRetainer), `/autoduty autoequip`. This repeats
    until the seals cover the GC purchases or the run limit (default 10) is reached.
 5. **Buy.** Vulcan runs the "CraftMeThis" vendor buy list. If it fails to buy a gemstone item (seen with the

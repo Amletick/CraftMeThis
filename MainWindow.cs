@@ -960,7 +960,7 @@ public sealed class MainWindow : Window
             ImGui.SetNextItemWidth(120);
             var runs = c.GcMaxRuns;
             if (ImGui.InputInt("Максимум пробегов", ref runs)) { c.GcMaxRuns = Math.Clamp(runs, 1, 100); p.SaveConfig(); }
-            ImGui.TextColored(Ui.Muted, "Режим прокачки AutoDuty берёт самый высокий данж для уровня класса. Класс — первый включённый из приоритетов с гирсетом (сначала 100-го уровня).");
+            ImGui.TextColored(Ui.Muted, "Данж — самый высокий из списка прокачки AutoDuty, который он пускает на уровне класса (на 100-м тоже), запуск /autoduty run <Support|Trust> <данж> 1. Класс — первый включённый из приоритетов с гирсетом (сначала 100-го уровня).");
             ImGui.TextColored(Ui.Muted, "Сдача шмота в GC (/autoduty gcturnin) требует ранг GC 6+ и AutoRetainer.");
             Ui.EndCard();
         }

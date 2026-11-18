@@ -1157,6 +1157,8 @@ public sealed class Plugin : IDalamudPlugin
 
     internal void RunCommand(string command) => Run(command);
 
+    internal int CurrentJobLevel() => Jobs.Get(Jobs.CurrentJob()) is { } j ? Jobs.Level(j) : 0;
+
     internal void StartLeveler()
     {
         if (Running) { Print("сейчас идёт крафт-запуск — останови его сначала."); return; }

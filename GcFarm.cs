@@ -1,4 +1,6 @@
 using System;
+using System.Linq;
+using System.Reflection;
 using Dalamud.Game.ClientState.Conditions;
 
 namespace CraftMeThis;
@@ -46,6 +48,50 @@ public sealed class GcFarm
         Plugin.Chat.Print($"[CraftMeThis] {why}");
     }
 
+    /// <summary>
+    /// The highest dungeon of AutoDuty's own leveling list that its CanRun check allows at this level
+    /// (AutoDuty.Helpers.LevelingHelper.LevelingDuties + ContentHelper.CanRun), read through reflection.
+    /// </summary>
+    public static (uint Territory, string Name)? HighestDuty(int level, bool trust, out string why)
+    {
+        why = "";
+        try
+        {
+            var inst = PluginFinder.FindPluginInstance("AutoDuty");
+            if (inst == null) { why = "AutoDuty не загружен"; return null; }
+            var asm = inst.GetType().Assembly;
+            const BindingFlags any = BindingFlags.Static | BindingFlags.Public | BindingFlags.NonPublic;
+            var duties = asm.GetType("AutoDuty.Helpers.LevelingHelper")?.GetProperty("LevelingDuties", any)?.GetValue(null) as Array;
+            var canRun = asm.GetType("AutoDuty.Helpers.ContentHelper")?.GetMethods(any).FirstOrDefault(m => m.Name == "CanRun");
+            var modeType = asm.GetType("AutoDuty.Data.Enums+DutyMode");
+            if (duties == null || canRun == null || modeType == null) { why = "у AutoDuty не нашёл список данжей — возможно, изменилась его версия"; return null; }
+            var mode = Enum.Parse(modeType, trust ? "Trust" : "None");
+            var ps = canRun.GetParameters();
+            for (var i = duties.Length - 1; i >= 0; i--)
+            {
+                var c = duties.GetValue(i);
+                if (c == null) continue;
+                var args = new object?[ps.Length];
+                args[0] = c;
+                if (ps.Length > 1) args[1] = Convert.ChangeType(level, ps[1].ParameterType);
+                if (ps.Length > 2) args[2] = mode;
+                for (var k = 3; k < ps.Length; k++) args[k] = ps[k].HasDefaultValue ? ps[k].DefaultValue : null;
+                if (canRun.Invoke(null, args) is not true) continue;
+                var t = c.GetType();
+                var tt = t.GetProperty("TerritoryType", BindingFlags.Instance | BindingFlags.Public)?.GetValue(c) is uint u ? u : 0;
+                var name = t.GetProperty("Name", BindingFlags.Instance | BindingFlags.Public)?.GetValue(c) as string ?? $"#{tt}";
+                if (tt != 0) return (tt, name);
+            }
+            why = $"ни один данж из списка прокачки AutoDuty не проходит на уровне {level}";
+            return null;
+        }
+        catch (Exception ex)
+        {
+            why = (ex as TargetInvocationException)?.InnerException?.Message ?? ex.Message;
+            return null;
+        }
+    }
+
     public static bool AutoDutyStopped()
     {
         try { return Plugin.Pi.GetIpcSubscriber<bool>("AutoDuty.IsStopped").InvokeFunc(); }
@@ -79,12 +125,23 @@ public sealed class GcFarm
                 return;
 
             case Step.Run:
+            {
                 if (now - stepAt < TimeSpan.FromSeconds(3)) return;
-                p.RunCommand($"/autoduty cfg leveling {p.Config.GcLevelingMode}");
-                p.RunCommand("/autoduty run 1");
+                // AutoDuty's leveling mode refuses level 100 ("lvl >= 100 → no leveling duty") and then
+                // "/autoduty run 1" fails, so the duty is picked here the same way and started explicitly.
+                var trust = p.Config.GcLevelingMode.StartsWith("Trust", StringComparison.OrdinalIgnoreCase);
+                var duty = HighestDuty(p.CurrentJobLevel(), trust, out var why);
+                if (duty == null)
+                {
+                    Finish($"Не нашёл данж для AutoDuty ({why}). Фарм печатей остановлен — покупаю, на что хватает.");
+                    return;
+                }
+                var mode = trust ? "Trust" : "Support";
+                p.RunCommand($"/autoduty run {mode} {duty.Value.Territory} 1");
                 Runs++;
-                Go(Step.WaitEnter, $"Пробег {Runs}: жду входа в данж (AutoDuty, режим {p.Config.GcLevelingMode})…");
+                Go(Step.WaitEnter, $"Пробег {Runs}: {duty.Value.Name} ({mode}) — жду входа…");
                 return;
+            }
 
             case Step.WaitEnter:
                 if (InDuty) { Go(Step.InDuty, $"Пробег {Runs}/{p.Config.GcMaxRuns}: AutoDuty проходит данж. Печати {have}/{need}."); return; }
