@@ -34,14 +34,14 @@ public sealed class Dependencies
         new("Auto FATE Grind", "AutoFateGrind", "https://grindless.pages.dev/repo.json", "фарм биколоров (FATE), автоуровень до 15", false, new[]
         {
             "Зону, фильтр уровней, свои покупки и очередь классов CraftMeThis ставит на время запуска и потом возвращает.",
-            "Бой и уклонение — через BossMod (Veyn), его пресет «Auto FATE Grind» AFG создаёт сам.",
+            "Бой и уклонение — через BossMod Reborn, его пресет «Auto FATE Grind» AFG создаёт сам.",
             "Для автоуровня 1–14: выбери зоны в окне /afg.",
         }),
         new("AutoDuty", "AutoDuty", "https://puni.sh/api/repository/erdelf", "печати GC (данжи + сдача), автоуровень 15+", false, new[]
         {
             "Сдача лута в GC (/autoduty gcturnin) требует ранг GC 6+ и AutoRetainer.",
             "Режим прокачки: Support до 70, с 71 можно Trust (Trust_Solo/Trust_Group) — выбирается в настройках CraftMeThis.",
-            "Нужен vnavmesh и BossMod.",
+            "Нужен vnavmesh и BossMod Reborn.",
         }),
         new("Hunter", "HunterV2", "https://raw.githubusercontent.com/t3knical/DalamudPlugins/main/repo.json", "фарм дропа с мобов", false, new[]
         {
@@ -53,9 +53,10 @@ public sealed class Dependencies
         {
             "Target → Engage settings: по умолчанию «All targets when solo in duty» — в открытом мире свежих мобов не бьёт; CraftMeThis переключает на время фарма мобов.",
         }),
-        new("BossMod (Veyn)", "BossMod", "https://puni.sh/api/repository/veyn", "бой в AFG и AutoDuty", false, new[]
+        new("BossMod Reborn", "BossModReborn", CombatReborn, "бой в AFG и AutoDuty", false, new[]
         {
-            "AFG и AutoDuty управляют им сами через свои пресеты.",
+            "AFG и AutoDuty управляют им сами через свои пресеты (IPC у Reborn тот же, что у BossMod).",
+            "Не держи одновременно включённым обычный BossMod (Veyn) — они конфликтуют.",
         }),
         new("vnavmesh", "vnavmesh", "https://puni.sh/api/repository/veyn", "передвижение (Vulcan, AFG, AutoDuty, Hunter)", false, new[]
         {
