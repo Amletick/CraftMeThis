@@ -53,6 +53,20 @@ public sealed class GcFarm
     /// Show_All_Items) is not Disabled; dungeon loot lands in the Armoury Chest, so Hide_Armoury_Chest_Items hands in nothing.
     /// Returns what is wrong, or null (also when AutoRetainer's config cannot be read).
     /// </summary>
+    private static (DateTime At, string? Problem, string Ok) deliveryCache;
+
+    /// <summary>
+    /// Cached (5 s) Expert Delivery check for the UI: Problem is what is wrong (null = fine), Ok a short "all good" line.
+    /// </summary>
+    public static (string? Problem, string Ok) DeliveryStatus()
+    {
+        if (DateTime.UtcNow - deliveryCache.At < TimeSpan.FromSeconds(5)) return (deliveryCache.Problem, deliveryCache.Ok);
+        var problem = DeliveryProblem();
+        var ok = problem == null ? "AutoRetainer: Expert Delivery включена, ранг GC подходит — сдача из данжей пойдёт." : "";
+        deliveryCache = (DateTime.UtcNow, problem, ok);
+        return (problem, ok);
+    }
+
     private static unsafe ulong LocalContentId()
     {
         var ps = FFXIVClientStructs.FFXIV.Client.Game.UI.PlayerState.Instance();

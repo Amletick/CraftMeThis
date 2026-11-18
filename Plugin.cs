@@ -332,6 +332,8 @@ public sealed class Plugin : IDalamudPlugin
             : Zones.Choose(Plan);
         if (Zone?.Sold.Any(s => s.Rank > 1) == true)
             Warnings.Add($"Часть материалов у торговца {Zone.Zone.Trader} открывается только с ранга {Zone.Sold.Max(s => s.Rank)} общих FATE в {Zone.Zone.Name}.");
+        if (Materials.Any(m => m.Route == Route.GcFarm) && GcFarm.DeliveryStatus().Problem is { } delivery)
+            Warnings.Add($"Фарм печатей GC не сможет сдать лут: {delivery}");
         if (Config.SwitchJob && Zone != null && Plan.Gems > Gems && Jobs.Pick(Config.Jobs, Zone.Zone.MinLevel) == null)
             Warnings.Add($"Нет включённого класса уровня {Zone.Zone.MinLevel}+ с гирсетом — фарм пойдёт текущим классом.");
     }
@@ -563,6 +565,9 @@ public sealed class Plugin : IDalamudPlugin
 
         if (Plan.Gems + Config.Reserve > Planner.GemCap)
             list.Add($"Корзине нужно {Plan.Gems} биколоров, а больше {Planner.GemCap} не носить: разбей корзину на части.");
+
+        if (Materials.Any(m => m.Route == Route.GcFarm) && GcFarm.DeliveryStatus().Problem is { } delivery)
+            list.Add($"Настроить сдачу в GC для фарма печатей: {delivery}");
 
         var poor = Materials.Where(m => m.Route == Route.Vendor && !m.Affordable).Select(m => $"{m.Name} ({m.Shortage})").ToList();
         if (poor.Count > 0)

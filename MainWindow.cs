@@ -952,6 +952,12 @@ public sealed class MainWindow : Window
         if (Ui.BeginCard("set-gc"))
         {
             Ui.Caption("Фарм печатей GC (AutoDuty)");
+            var (deliveryProblem, deliveryOk) = GcFarm.DeliveryStatus();
+            Ui.Icon(deliveryProblem == null ? FontAwesomeIcon.CheckCircle : FontAwesomeIcon.ExclamationTriangle, deliveryProblem == null ? Ui.Good : Ui.Bad);
+            ImGui.SameLine();
+            ImGui.PushStyleColor(ImGuiCol.Text, deliveryProblem == null ? Ui.Good : Ui.Bad);
+            ImGui.TextWrapped(deliveryProblem ?? deliveryOk);
+            ImGui.PopStyleColor();
             ImGui.SetNextItemWidth(160);
             if (ImGui.BeginCombo("Режим AutoDuty", c.GcLevelingMode))
             {
