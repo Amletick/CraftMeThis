@@ -1,69 +1,80 @@
 # CraftMeThis
 
-A Dalamud plugin that drives **GatherBuddy Reborn's Vulcan** and **Auto FATE Grind** together:
-a Teamcraft list goes in, and crafted items come out.
+A Dalamud plugin that turns a Teamcraft list into crafted items. It coordinates two other plugins:
 
-1. **Cart.** Import a Teamcraft list (list link, import link, text) into the plugin's cart.
-2. **Plan.** Walk the recipe tree, using what is already in your bags: gemstones needed, vendor purchases
-   (gil, Grand Company, scrips, Gemstone Trader) and what only the market board or drops give.
-3. **Farm.** If gemstones are short: switch to the first suitable job from your priority list, put the farm zone
-   (where the Gemstone Trader sells the materials) into Auto FATE Grind, turn off its level filter and own purchases,
-   `/afg start`, and `/afg stop soft` once there are enough. Your AFG settings are restored afterwards.
-4. **Buy.** Build a "CraftMeThis" vendor buy list in GatherBuddy's **Vulcan** and run it.
-5. **Craft.** Turn Artisan off (Vulcan does not craft while it is loaded), start an ephemeral Vulcan crafting list
-   with the cart (it gathers what is missing and crafts with its own solver), then turn Artisan back on.
+- **GatherBuddy Reborn**: its **Vulcan** module buys from vendors, gathers what is missing and crafts.
+- **Auto FATE Grind** (AFG): farms Bicolor Gemstones when the cart needs items from a Gemstone Trader.
 
-## Window (`/craftme` or `/cmt`)
+CraftMeThis plans the run, picks the farm zone and job, keeps track of everything and puts the other plugins' settings back afterwards.
 
-The header has buttons that open the Teamcraft list, Vulcan (`/vulcan`) and Auto FATE Grind (`/afg`).
+## How a run goes
 
-- **Farm**: plan, gemstone count, farm zone (automatic or manual), the job that will be used, Start/Stop.
-- **Cart**: import from Teamcraft, edit craft counts.
-- The **Teamcraft** button in the header opens the imported list, or the plugin's cart as a Teamcraft import.
-- **Materials**: every raw material the cart is missing, grouped by route — gather/fish (Vulcan's queue gathers it),
-  Bicolor (AFG farms the gemstones, Vulcan buys), vendor (Vulcan's buy list: gil, GC, scrips…) or market/by hand.
-  Each material can be switched to any route it supports; "auto" picks gather → gemstones → vendor → by hand.
-- **Tree**: the cart as a craft tree (cart recipes → precrafts → raw materials, crystals hidden) with bag counts and a
-  status per line: done, being crafted (Vulcan's current recipe), ready to craft, waiting for materials, and for raw
-  materials gather / gemstones / vendor / by hand; after a run, cart lines Vulcan did not finish are marked. Updates every second.
-- **Materials in Vulcan**: the cart is mirrored into Vulcan's persistent crafting list "CraftMeThis" (updated on every
-  cart change); the button opens that list together with Vulcan's own Materials window.
-- **Jobs**: job priority (up/down arrows), on/off per job, level and gearset.
-- **Settings**: extra gemstones, AFG zone, vendor purchases on/off, craft after buying, retainers, Artisan off/on, idle wait, soft-stop timeout.
+1. **Cart.** Import a Teamcraft list (list link, import link or text). The cart is mirrored into Vulcan's crafting
+   list "CraftMeThis".
+2. **Plan.** CraftMeThis walks the recipe tree against your bags and decides, for every missing raw material, how to
+   get it:
+   - *gather/fish*: Vulcan's queue gathers it;
+   - *Bicolor*: Gemstone Trader, paid with gemstones that AFG farms;
+   - *vendor*: Vulcan's vendor buy list (gil, Grand Company seals, beast tribe currencies, scrips…);
+   - *by hand*: market board or mob drops.
+
+   "Auto" picks gather → gemstones → vendor → by hand. A vendor whose currency is short (no beast tribe currency,
+   not enough GC seals…) is skipped. Each material can be switched by hand on the **Materials** tab.
+3. **Farm** (only if gemstones are short). Equip the first suitable job from the priority list, set the farm zone (the
+   zone whose Gemstone Trader sells the materials) in AFG, and turn off AFG's level filter and its own purchases.
+   Then `/afg start`, and `/afg stop soft` once there are enough gemstones.
+4. **Buy.** Vulcan runs the "CraftMeThis" vendor buy list. If it fails to buy a gemstone item (seen with the
+   Tuliyollal trader: "Timed out opening … special shop"), AFG's own trader hand-off buys it instead.
+5. **Craft.** Turn Artisan off (Vulcan does not craft while it is loaded), run Vulcan's gather + craft queue on the
+   "CraftMeThis" list ("Skip if Already Have Enough" on), then turn Artisan back on.
+6. **Report.** List what was crafted and what was not, with the ingredients that were missing. After a run with gaps,
+   **resume mode** turns on: Vulcan's "Include Final Crafts" is set, so the next run only crafts what is still missing.
+
+All changes to AFG settings (zones, class queue, level filter, shopping list, trade settings) are restored when the
+run ends or is stopped.
+
+## Window (`/craftme`, `/cmt`)
+
+The header has buttons for Teamcraft (opens the imported list, or the cart as a Teamcraft import), Vulcan and AFG.
+
+- **Farm**: gemstones (have / need), farm zone (auto or manual) and the job that will be used, gemstone materials,
+  vendor purchases, the start button and status. Resume mode is shown here when it is on.
+- **Cart**: Teamcraft import, craft counts, "Materials in Vulcan" (opens Vulcan's own Materials window for the cart).
+- **Materials**: every missing raw material, grouped by route, with Vulcan's vendor price and currency. Materials
+  whose currency is short are shown in red. The route can be changed per material.
+- **Tree**: the cart as a craft tree (cart recipe → precrafts → raw materials, crystals hidden). Each line has bag
+  counts and a status: done, crafting now, ready, waiting for materials, gather, buy for gemstones,
+  farm gemstones and buy, vendor, by hand, not crafted. At the bottom, a live strip shows the pipeline steps,
+  what is happening right now (the item being bought, the recipe and count being crafted, GatherBuddy's
+  auto-gather status) and what comes next.
+- **Jobs**: job priority for FATE farming: up/down arrows, on/off, level and gearset.
+- **Settings**: extra gemstones, AFG zone on/off, vendor purchases on/off, craft after buying, retainers,
+  Artisan off/on, resume mode, idle wait, AFG soft-stop timeout.
+
+A panel at the bottom lists what the plugin will not do by itself: market/drop materials, missing vendor currency,
+Gemstone Trader stock that needs a higher shared FATE rank, carts over 1500 gemstones, and Free Company workshop
+phases.
 
 Commands: `/craftme plan`, `/craftme start`, `/craftme stop`.
 
-## What it will not do
-
-A panel at the bottom of the window lists what is left to you for the cart:
-- materials with no gathering node, fishing spot or vendor Vulcan knows (market board, drops);
-- Gemstone Trader stock that needs a higher shared FATE rank;
-- carts that need more than 1500 gemstones;
-- Free Company workshop phases and their raw materials (from an imported list);
-
 ## Teamcraft import
 
-Paste any of these:
-- a list link (`https://ffxivteamcraft.com/list/<id>`). The list is read from Teamcraft's public data, so it must be
-  shared by link. Free Company workshop items (submarine and airship parts, recipe id `fc…`) are built phase by phase
-  in the workshop, which a crafting queue cannot do, so their craftable components go into the cart instead;
-- an import link (`https://ffxivteamcraft.com/import/...`);
-- a "Copy as text" list (only the *Final items* section is used);
-- plain lines like `5x Boiled Alpaca Steak`.
+- List link `https://ffxivteamcraft.com/list/<id>`. It is read from Teamcraft's public data, so the list must be
+  shared by link. Free Company workshop items (`fc…` recipes) are built in the workshop, so their craftable
+  components go into the cart instead.
+- Import link `https://ffxivteamcraft.com/import/...`.
+- "Copy as text" (only the *Final items* section is used), or plain lines like `5x Boiled Alpaca Steak`.
 
 Teamcraft amounts are items, so they are converted to crafts using the recipe yield.
 
 ## Requirements and limits
 
-- Requires **GatherBuddy Reborn** (Vulcan buys and crafts) and, when gemstones are needed, **Auto FATE Grind**.
-  Vulcan's own vendor data covers gil vendors, Grand Company exchange, scrips and Gemstone Traders.
-- Bicolor Gemstones are capped at 1500.
-- Trader stock depends on the zone's shared FATE rank; the plugin shows the rank each material needs.
-- Zones: Endwalker and Dawntrail field zones (those whose Gemstone Trader is placed in the Level sheet).
-- Neither Vulcan nor Auto FATE Grind has IPC for this. The plugin calls Vulcan's own `VendorBuyListManager`,
-  `CraftingListManager` and `CraftingGatherBridge` and edits Auto FATE Grind's `Plugin.Cfg` through reflection,
-  so an update of either plugin can break that part. The plugin reports which part failed.
-- Crafting uses Vulcan's solver, not Artisan.
+- GatherBuddy Reborn (tested with 7.5.6.1) and, when gemstones are needed, Auto FATE Grind (2.24).
+- Neither of them has IPC for this. CraftMeThis calls Vulcan's `VendorBuyListManager`, `CraftingListManager` and
+  `CraftingGatherBridge`, and edits AFG's `Plugin.Cfg`, all through reflection. An update of either plugin can break
+  that part; the plugin then reports which part failed.
+- Crafting uses Vulcan's solver (Raphael), not Artisan.
+- Bicolor Gemstones are capped at 1500. Farm zones: Endwalker and Dawntrail field zones.
 
 ## Install
 
@@ -76,9 +87,8 @@ https://github.com/Amletick/CraftMeThis/releases/latest/download/repo.json
 ## Release
 
 ```
-python publish.py 0.5.1
+python publish.py 0.11.0
 ```
 
-This builds the plugin, bumps the version, pushes to GitHub and creates a GitHub release with `latest.zip` and `repo.json`.
-The `releases/latest/download/...` link is not cached, so Dalamud sees the new version immediately
-(raw.githubusercontent.com caches for about five minutes).
+This builds the plugin, bumps the version, pushes and creates a GitHub release with `latest.zip` and `repo.json`.
+The `releases/latest/download/...` link is not cached, so Dalamud sees the new version at once.
