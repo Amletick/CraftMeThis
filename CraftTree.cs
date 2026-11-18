@@ -33,6 +33,7 @@ public enum NodeState
     BicolorFarm,// raw: gemstone purchase, gemstones still to farm
     Vendor,     // raw: Vulcan vendor list
     GcFarm,     // raw: GC seals to farm with AutoDuty first
+    MobFarm,    // raw: mob drop, Hunter farms it
     Manual,     // raw: market / by hand
     Failed,     // the last craft run did not make it
 }
@@ -94,6 +95,7 @@ public static class CraftTree
                 Route.Bicolor => gemsEnough ? NodeState.Bicolor : NodeState.BicolorFarm,
                 Route.Vendor => NodeState.Vendor,
                 Route.GcFarm => NodeState.GcFarm,
+                Route.MobFarm => NodeState.MobFarm,
                 _ => NodeState.Manual,
             };
         }

@@ -96,6 +96,7 @@ public sealed class MainWindow : Window
             Phase.Stopping => ("завершаю FATE", Ui.Warn),
             Phase.Buying => ("покупки", Ui.Accent),
             Phase.GcFarming => ("фарм печатей GC", Ui.Warn),
+            Phase.MobFarming => ("фарм мобов", Ui.Bad),
             Phase.AfgBuying => ("покупка за биколоры", Ui.Gem),
             Phase.Crafting => ("крафт", Ui.Accent),
             Phase.Done => ("готово", Ui.Good),
@@ -391,6 +392,7 @@ public sealed class MainWindow : Window
         (Route.Bicolor, "Биколоры — нафармит AFG, купит Vulcan у Gemstone Trader", FontAwesomeIcon.Gem),
         (Route.Vendor, "Вендор — купит Vulcan (гил, GC, скрипы…)", FontAwesomeIcon.Store),
         (Route.GcFarm, "Печати GC — AutoDuty бегает данжи и сдаёт шмот в GC, потом купит Vulcan", FontAwesomeIcon.Dungeon),
+        (Route.MobFarm, "Дроп с мобов — нафармит Hunter", FontAwesomeIcon.Skull),
         (Route.Market, "Рынок / вручную / фарм мобов — сделать самому", FontAwesomeIcon.HandPaper),
     };
 
@@ -400,6 +402,7 @@ public sealed class MainWindow : Window
         Route.Bicolor => Ui.Gem,
         Route.Vendor => Ui.Accent,
         Route.GcFarm => Ui.Warn,
+        Route.MobFarm => Ui.Bad,
         _ => Ui.Warn,
     };
 
@@ -466,7 +469,12 @@ public sealed class MainWindow : Window
                             if (ImGui.Selectable(Plugin.RouteName(o), m.Chosen && m.Route == o)) p.SetRoute(m.ItemId, o);
                         ImGui.EndCombo();
                     }
-                    if (m.Options.Count == 1 && ImGui.IsItemHovered()) ImGui.SetTooltip("Других путей нет: ни сбора, ни Gemstone Trader, ни вендора, которого знает Vulcan.");
+                    if (ImGui.IsItemHovered())
+                    {
+                        var mobs = m.Options.Contains(Route.MobFarm) ? p.Hunter.DroppedBy(p.EnglishName(m.ItemId)) : System.Array.Empty<string>();
+                        if (mobs.Count > 0) ImGui.SetTooltip($"Падает с: {string.Join(", ", mobs.Take(6))}");
+                        else if (m.Options.Count == 1) ImGui.SetTooltip("Других путей нет: ни сбора, ни Gemstone Trader, ни вендора, которого знает Vulcan, ни моба в базе Hunter.");
+                    }
                     ImGui.PopID();
                 }
                 ImGui.EndTable();
@@ -492,6 +500,7 @@ public sealed class MainWindow : Window
         NodeState.BicolorFarm => (FontAwesomeIcon.Crosshairs, Ui.Gem, "нафармить и купить"),
         NodeState.Vendor => (FontAwesomeIcon.Store, Ui.Accent, "купит Vulcan"),
         NodeState.GcFarm => (FontAwesomeIcon.Dungeon, Ui.Warn, "печати GC: AutoDuty"),
+        NodeState.MobFarm => (FontAwesomeIcon.Skull, Ui.Bad, "нафармит Hunter"),
         NodeState.Manual => (FontAwesomeIcon.HandPaper, Ui.Warn, "вручную / рынок"),
         _ => (FontAwesomeIcon.TimesCircle, Ui.Bad, "не скрафчено"),
     };
@@ -706,6 +715,15 @@ public sealed class MainWindow : Window
             if (ImGui.Checkbox("…и включать обратно после", ref back)) { c.ReenableArtisan = back; p.SaveConfig(); }
             ImGui.EndDisabled();
             ImGui.TextColored(Ui.Muted, "Vulcan не крафтит, пока загружен Artisan.");
+            Ui.EndCard();
+        }
+        if (Ui.BeginCard("set-mob"))
+        {
+            Ui.Caption("Фарм мобов (Hunter)");
+            ImGui.SetNextItemWidth(120);
+            var mins = c.MobFarmMaxMinutes;
+            if (ImGui.InputInt("Максимум минут на дроп", ref mins)) { c.MobFarmMaxMinutes = Math.Clamp(mins, 5, 600); p.SaveConfig(); }
+            ImGui.TextColored(Ui.Muted, "Путь «Фарм мобов» появляется у предметов из базы мобов Hunter. На время запуска его список «CraftMeThis» — единственный включённый; твои списки потом включаются обратно. Hunter нужны vnavmesh, Rotation Solver Reborn и Lifestream.");
             Ui.EndCard();
         }
         if (Ui.BeginCard("set-gc"))

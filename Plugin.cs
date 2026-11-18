@@ -61,6 +61,8 @@ public sealed class Configuration : IPluginConfiguration
     public string GcLevelingMode { get; set; } = "Support";
     /// <summary>At most this many dungeon runs per GC seal farm.</summary>
     public int GcMaxRuns { get; set; } = 10;
+    /// <summary>Give Hunter at most this many minutes for the mob drops.</summary>
+    public int MobFarmMaxMinutes { get; set; } = 60;
 }
 
 /// <summary>How a raw material is obtained.</summary>
@@ -76,6 +78,8 @@ public enum Route
     Market,
     /// <summary>Grand Company seals farmed with AutoDuty (dungeons + expert delivery), then Vulcan buys.</summary>
     GcFarm,
+    /// <summary>Mob drop farmed by Hunter (HunterV2).</summary>
+    MobFarm,
 }
 
 /// <summary>A raw material of the cart with its possible and chosen route.</summary>
@@ -91,7 +95,7 @@ public sealed class CartEntry
     public int Crafts { get; set; }
 }
 
-public enum Phase { Idle, Preparing, Farming, Stopping, GcFarming, Buying, AfgBuying, Crafting, Done, Failed }
+public enum Phase { Idle, Preparing, Farming, Stopping, GcFarming, Buying, AfgBuying, MobFarming, Crafting, Done, Failed }
 
 /// <summary>A material Vulcan will buy from a vendor: target is the bag count to reach.</summary>
 public sealed record VendorBuy(uint ItemId, string Name, int Units, int Target, bool ForGemstones);
@@ -135,7 +139,14 @@ public sealed class Plugin : IDalamudPlugin
     internal List<string> Warnings { get; } = new();
     internal ZoneChoice? Zone { get; private set; }
 
-    internal bool Running => Phase is Phase.Preparing or Phase.Farming or Phase.Stopping or Phase.GcFarming or Phase.Buying or Phase.AfgBuying or Phase.Crafting;
+    internal bool Running => Phase is Phase.Preparing or Phase.Farming or Phase.Stopping or Phase.GcFarming or Phase.Buying or Phase.AfgBuying or Phase.MobFarming or Phase.Crafting;
+    internal readonly HunterLink Hunter = new();
+    private readonly Lumina.Excel.ExcelSheet<Item> englishItems;
+    private List<VendorBuy> mobFarm = new();
+    private DateTime mobIdleSince = DateTime.MinValue;
+
+    /// <summary>English item name (Hunter's mob database uses English names).</summary>
+    internal string EnglishName(uint id) => englishItems.TryGetRow(id, out var it) ? it.Name.ExtractText() : "";
     internal GcFarm Gc { get; private set; } = null!;
     private bool Farming => Phase is Phase.Preparing or Phase.Farming or Phase.Stopping or Phase.AfgBuying;
 
@@ -175,6 +186,7 @@ public sealed class Plugin : IDalamudPlugin
         Jobs.Normalize(Config.Jobs);
 
         Gc = new GcFarm(this);
+        englishItems = Data.GetExcelSheet<Item>(ClientLanguage.English);
         window = new MainWindow(this);
         windows.AddWindow(window);
         Pi.UiBuilder.Draw += windows.Draw;
@@ -195,6 +207,8 @@ public sealed class Plugin : IDalamudPlugin
         Commands.RemoveHandler(Cmd);
         Commands.RemoveHandler(CmdShort);
         afg.Restore();
+        if (Phase == Phase.MobFarming) Hunter.SetAutoHunt(false);
+        Hunter.Restore();
         if (artisanTurnedOff && Config.ReenableArtisan) Vulcan.SetArtisan(true);
         Pi.UiBuilder.Draw -= windows.Draw;
         Pi.UiBuilder.OpenMainUi -= OpenWindow;
@@ -293,6 +307,8 @@ public sealed class Plugin : IDalamudPlugin
         if (src == Source.Vendor || (!Planner.HasGemOffer(itemId) && IsLoaded(GatherBuddy) && Vulcan.CanBuy(itemId))) options.Add(Route.Vendor);
         // Sold for Grand Company seals: the seals can be farmed with AutoDuty first.
         if (options.Contains(Route.Vendor) && IsLoaded(GatherBuddy) && Vulcan.PriceOf(itemId)?.Group == "GrandCompanySeals") options.Add(Route.GcFarm);
+        // A mob drop Hunter knows (its mob database: who drops it and where).
+        if (IsLoaded(HunterLink.InternalName) && Hunter.DroppedBy(EnglishName(itemId)).Count > 0) options.Add(Route.MobFarm);
         options.Add(Route.Market);
         return options;
     }
@@ -353,6 +369,7 @@ public sealed class Plugin : IDalamudPlugin
         Route.Bicolor => "Биколоры",
         Route.Vendor => "Вендор",
         Route.GcFarm => "Фарм печатей GC",
+        Route.MobFarm => "Фарм мобов (Hunter)",
         _ => "Рынок / вручную",
     };
 
@@ -586,6 +603,7 @@ public sealed class Plugin : IDalamudPlugin
         if (Farming) Run("/afg stop");
         if (Phase == Phase.Buying) Vulcan.StopVendor();
         if (Phase == Phase.GcFarming) Run("/autoduty stop");
+        if (Phase == Phase.MobFarming) { Hunter.SetAutoHunt(false); Hunter.Restore(); }
         if (Phase == Phase.Crafting) Vulcan.StopCrafting();
         afg.Restore();
         RestoreArtisan();
@@ -612,7 +630,7 @@ public sealed class Plugin : IDalamudPlugin
         }
         if (!Config.BuyFromVendors || VendorBuys.Count == 0)
         {
-            EnterCrafting();
+            EnterMobFarming();
             return;
         }
         var accepted = Vulcan.SetVendorList(VendorBuys.Select(v => (v.ItemId, v.Target)).ToList(), out var err);
@@ -625,7 +643,7 @@ public sealed class Plugin : IDalamudPlugin
         if (refused.Count > 0) Print($"Vulcan не нашёл вендора для: {string.Join(", ", refused)}.");
         if (accepted.Count == 0)
         {
-            EnterCrafting();
+            EnterMobFarming();
             return;
         }
         vendorStarted = false;
@@ -694,6 +712,7 @@ public sealed class Plugin : IDalamudPlugin
                 break;
             case Phase.Buying: TickBuying(now); break;
             case Phase.AfgBuying: TickAfgBuying(now); break;
+            case Phase.MobFarming: TickMobFarming(now); break;
             case Phase.Crafting: TickCrafting(now); break;
         }
     }
@@ -739,7 +758,7 @@ public sealed class Plugin : IDalamudPlugin
         if (now - idleSince < TimeSpan.FromSeconds(Math.Max(2, Config.IdleSeconds))) return;
 
         afg.Restore();
-        if (afterStop == Phase.Crafting) EnterCrafting();
+        if (afterStop == Phase.Crafting) EnterMobFarming();
         else EnterBuying();
     }
 
@@ -757,7 +776,7 @@ public sealed class Plugin : IDalamudPlugin
                     return;
                 case "Empty":
                 case "NoPendingEntries":
-                    EnterCrafting();
+                    EnterMobFarming();
                     return;
                 case "VendorDataLoading":
                 case "LocationDataLoading":
@@ -792,6 +811,63 @@ public sealed class Plugin : IDalamudPlugin
             EnterAfgBuying(gemMissing);
             return;
         }
+        EnterMobFarming();
+    }
+
+    /// <summary>Mob drops through Hunter, then crafting.</summary>
+    private void EnterMobFarming()
+    {
+        Recalculate();
+        mobFarm = Materials.Where(m => m.Route == Route.MobFarm && m.Missing > 0)
+                           .Select(m => new VendorBuy(m.ItemId, m.Name, m.Missing, m.Have + m.Missing, false)).ToList();
+        if (mobFarm.Count == 0) { EnterCrafting(); return; }
+        if (!IsLoaded(HunterLink.InternalName))
+        {
+            Print("Hunter не загружен — дроп с мобов не фармлю.");
+            EnterCrafting();
+            return;
+        }
+        var err = Hunter.SetList(mobFarm.Select(v => (v.ItemId, EnglishName(v.ItemId), v.Target)).ToList()) ?? Hunter.SetAutoHunt(true);
+        if (err != null)
+        {
+            Hunter.Restore();
+            Print(err);
+            EnterCrafting();
+            return;
+        }
+        EquipFarmJob(forDungeons: true);
+        phaseStartedAt = DateTime.UtcNow;
+        mobIdleSince = DateTime.MinValue;
+        SetStatus(Phase.MobFarming, $"Hunter фармит мобов: {string.Join(", ", mobFarm.Select(v => $"{v.Name} ×{v.Units}"))}.");
+    }
+
+    private void TickMobFarming(DateTime now)
+    {
+        var left = mobFarm.Where(v => BagCount(v.ItemId) < v.Target).ToList();
+        var hs = Hunter.Status();
+        Status = left.Count == 0 ? "Дроп собран, жду, пока Hunter закончит."
+            : $"Hunter фармит: {string.Join(", ", left.Select(v => $"{v.Name} {BagCount(v.ItemId)}/{v.Target}"))}" + (hs.Length > 0 ? $" — {hs}" : "");
+        var timedOut = now - phaseStartedAt > TimeSpan.FromMinutes(Math.Max(5, Config.MobFarmMaxMinutes));
+
+        if (Hunter.AutoHuntOn)
+        {
+            if (left.Count > 0 && !timedOut) return;                  // still hunting
+            if (left.Count == 0)
+            {
+                // Everything dropped: Hunter turns itself off after "/li thespot"; give it a minute to do so.
+                if (mobIdleSince == DateTime.MinValue) mobIdleSince = now;
+                if (now - mobIdleSince < TimeSpan.FromSeconds(60)) return;
+            }
+            else
+            {
+                Print($"Hunter за {Config.MobFarmMaxMinutes} мин собрал не всё — крафчу, что получится.");
+            }
+            Hunter.SetAutoHunt(false);
+        }
+        if (!IsIdle()) return;
+        Hunter.Restore();
+        if (left.Count > 0 && !timedOut)
+            Print($"Hunter остановился, а собрано не всё: {string.Join(", ", left.Select(v => $"{v.Name} {BagCount(v.ItemId)}/{v.Target}"))}.");
         EnterCrafting();
     }
 
@@ -920,6 +996,8 @@ public sealed class Plugin : IDalamudPlugin
                 : Gc.Finished || (Phase is Phase.Buying or Phase.AfgBuying or Phase.Crafting or Phase.Done && Materials.Any(m => m.Route == Route.GcFarm)) ? 2
                 : Materials.Any(m => m.Route == Route.GcFarm) ? 0 : -1),
             ("Покупки у вендоров", Phase == Phase.Buying ? 1 : Phase is Phase.AfgBuying or Phase.Crafting or Phase.Done ? 2 : VendorBuys.Count > 0 ? 0 : -1),
+            ("Фарм мобов (Hunter)", Phase == Phase.MobFarming ? 1 : Phase is Phase.Crafting or Phase.Done && Materials.Any(m => m.Route == Route.MobFarm) ? 2
+                : Materials.Any(m => m.Route == Route.MobFarm) ? 0 : -1),
             ("Сбор и крафт", Phase == Phase.Crafting ? 1 : Phase == Phase.Done ? 2 : Config.Cart.Count > 0 ? 0 : -1),
         };
         if (Phase is Phase.AfgBuying || (Phase == Phase.Stopping && afterStop == Phase.Crafting))
@@ -962,6 +1040,8 @@ public sealed class Plugin : IDalamudPlugin
                 var (h, n) = GcSeals();
                 return ($"{Gc.Now} (печати {h}/{n})", new() { $"Купить: {ItemList(toBuy)}", $"Скрафтить: {crafts}" });
             }
+            case Phase.MobFarming:
+                return (Status, new() { $"Скрафтить: {crafts}" });
             case Phase.AfgBuying:
                 return ($"Auto FATE Grind покупает у Gemstone Trader: {ItemList(toBuy.Where(v => v.ForGemstones))}.", new() { $"Скрафтить: {crafts}" });
             case Phase.Crafting:
@@ -1001,6 +1081,8 @@ public sealed class Plugin : IDalamudPlugin
         if (farm) next.Add($"Нафармить биколоры{(Zone != null ? " в " + Zone.Zone.Name : "")}: {Gems}/{Target}");
         var (sh, sn) = GcSeals();
         if (sh < sn && Materials.Any(m => m.Route == Route.GcFarm)) next.Add($"Нафармить печати GC через AutoDuty: {sh}/{sn}");
+        var mobs = Materials.Where(m => m.Route == Route.MobFarm).Select(m => $"{m.Name} ×{m.Missing}").ToList();
+        if (mobs.Count > 0) next.Add($"Нафармить с мобов (Hunter): {string.Join(", ", mobs)}");
         if (toBuy.Count > 0) next.Add($"Купить: {list(toBuy)}");
         if (crafts.Length > 0) next.Add($"Скрафтить: {crafts}");
         return next;
