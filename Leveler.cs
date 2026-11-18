@@ -128,12 +128,19 @@ public sealed class Leveler
         p.LevelerFinished(why);
     }
 
-    /// <summary>AutoDuty helper (autoequip, gcturnin): wait for it to start, then for it to stop and the character to idle 15 s.</summary>
-    private bool HelperDone(DateTime now, int maxMinutes)
+    /// <summary>
+    /// AutoDuty helper (autoequip, gcturnin): wait for it to start, then for it to stop and the character to idle 15 s.
+    /// Watches the helper's own state (GcFarm.HelperRunning): AutoDuty.IsStopped stays true while the GC turn-in is still
+    /// walking to the NPC, and the next command (autoequip) then broke the delivery (AutoRetainer TaskTimeoutException).
+    /// </summary>
+    private bool HelperDone(DateTime now, int maxMinutes, string helper)
     {
-        if (!GcFarm.AutoDutyStopped()) helperSeen = true;
-        if (!helperSeen && now - stepAt < TimeSpan.FromSeconds(15)) return false;
-        if (GcFarm.AutoDutyStopped() && Idle)
+        var running = GcFarm.HelperRunning(helper);
+        if (running == true || (running == null && !GcFarm.AutoDutyStopped())) helperSeen = true;
+        var startWait = helper == "GCTurninHelper" ? 30 : 15;
+        if (!helperSeen && now - stepAt < TimeSpan.FromSeconds(startWait)) return false;
+        var stopped = running == null ? GcFarm.AutoDutyStopped() : running == false;
+        if (stopped && Idle)
         {
             idleSince ??= now;
             if (now - idleSince >= TimeSpan.FromSeconds(15)) return true;
@@ -360,7 +367,7 @@ public sealed class Leveler
                 return;
 
             case Step.AfterEquip:
-                if (!HelperDone(now, 2)) return;
+                if (!HelperDone(now, 2, "AutoEquipHelper")) return;
                 if (C.LevelGcFreeSlots > 0 && FreeSlots() < C.LevelGcFreeSlots)
                 {
                     Cmd("/autoduty gcturnin");
@@ -371,18 +378,18 @@ public sealed class Leveler
                 return;
 
             case Step.AfterTurnIn:
-                if (!HelperDone(now, 15)) return;
+                if (!HelperDone(now, 15, "GCTurninHelper")) return;
                 Cmd("/autoduty autoequip");
                 Go(Step.AfterEquip2, "");
                 return;
 
             case Step.AfterEquip2:
-                if (!HelperDone(now, 2)) return;
+                if (!HelperDone(now, 2, "AutoEquipHelper")) return;
                 Go(Step.Decide, "");
                 return;
 
             case Step.RetryEquip:
-                if (!HelperDone(now, 2)) return;
+                if (!HelperDone(now, 2, "AutoEquipHelper")) return;
                 Go(Step.DungeonCfg, "");
                 return;
         }

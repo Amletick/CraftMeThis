@@ -1,7 +1,9 @@
 using System;
 using System.Collections.Generic;
 using System.Linq;
+using System.IO;
 using System.Reflection;
+using System.Text.Json;
 using Dalamud.Game.ClientState.Conditions;
 
 namespace CraftMeThis;
@@ -37,7 +39,56 @@ public sealed class GcFarm
         Runs = 0;
         emptyTurnIns = 0;
         Finished = false;
+        if (DeliveryProblem() is { } problem)
+        {
+            Finish(problem + " Фарм печатей не запускаю — покупаю, на что хватает.");
+            return;
+        }
         Go(Step.Equip, "Готовлю класс для данжей…");
+    }
+
+    /// <summary>
+    /// AutoDuty's gcturnin hands the delivery to AutoRetainer, which only delivers when the character's
+    /// "Expert Delivery" mode (OfflineData[].GCDeliveryType: Disabled, Hide_Armoury_Chest_Items, Hide_Gear_Set_Items,
+    /// Show_All_Items) is not Disabled; dungeon loot lands in the Armoury Chest, so Hide_Armoury_Chest_Items hands in nothing.
+    /// Returns what is wrong, or null (also when AutoRetainer's config cannot be read).
+    /// </summary>
+    private static unsafe ulong LocalContentId()
+    {
+        var ps = FFXIVClientStructs.FFXIV.Client.Game.UI.PlayerState.Instance();
+        return ps == null ? 0 : ps->ContentId;
+    }
+
+    public static string? DeliveryProblem()
+    {
+        try
+        {
+            var path = Path.Combine(Plugin.Pi.ConfigDirectory.Parent!.FullName, "AutoRetainer", "DefaultConfig.json");
+            if (!File.Exists(path)) return "AutoRetainer не найден — сдачу в GC делать некому.";
+            using var fs = new FileStream(path, FileMode.Open, FileAccess.Read, FileShare.ReadWrite | FileShare.Delete);
+            using var doc = JsonDocument.Parse(fs);
+            if (!doc.RootElement.TryGetProperty("OfflineData", out var chars)) return null;
+            var cid = LocalContentId();
+            foreach (var c in chars.EnumerateArray())
+            {
+                if (!c.TryGetProperty("CID", out var id) || !id.TryGetUInt64(out var v) || v != cid) continue;
+                var name = c.TryGetProperty("Name", out var n) ? n.GetString() : "персонаж";
+                if (c.TryGetProperty("GCRank", out var rank) && rank.TryGetInt32(out var r) && r < 6)
+                    return $"У {name} ранг Grand Company {r}, а Expert Delivery открывается с 6.";
+                var mode = c.TryGetProperty("GCDeliveryType", out var m) && m.TryGetInt32(out var t) ? t : 0;
+                return mode switch
+                {
+                    0 => $"В AutoRetainer у {name} Expert Delivery выключена (Disabled). Включи режим «Hide Gear Set Items» в AutoRetainer → Grand Company Delivery → Character Configuration.",
+                    1 => $"В AutoRetainer у {name} режим Expert Delivery «Hide Armoury Chest Items» — лут из данжей лежит в арсенале и сдан не будет. Поставь «Hide Gear Set Items».",
+                    _ => null,
+                };
+            }
+        }
+        catch
+        {
+            // unreadable: let the run try
+        }
+        return null;
     }
 
     private void Go(Step s, string now)
@@ -135,11 +186,18 @@ public sealed class GcFarm
     /// Is AutoDuty's GC turn-in helper running? (ActiveHelperBase&lt;GCTurninHelper, …&gt;.State == Running).
     /// null when it cannot be read; then "AutoDuty stopped + character idle" is used instead.
     /// </summary>
-    private static bool? TurnInRunning()
+    private static bool? TurnInRunning() => HelperRunning("GCTurninHelper");
+
+    /// <summary>
+    /// Is an AutoDuty helper (GCTurninHelper, AutoEquipHelper, …) running? Its static ActiveHelperBase&lt;T, C&gt;.State.
+    /// AutoDuty.IsStopped stays true while these run (e.g. the turn-in walking to the GC), so it cannot be used for them.
+    /// null when the state cannot be read.
+    /// </summary>
+    public static bool? HelperRunning(string helper)
     {
         try
         {
-            var baseType = AutoDutyAssembly()?.GetType("AutoDuty.Helpers.GCTurninHelper")?.BaseType;
+            var baseType = AutoDutyAssembly()?.GetType("AutoDuty.Helpers." + helper)?.BaseType;
             var state = baseType?.GetField("State", AnyStatic)?.GetValue(null);
             return state == null ? null : state.ToString() == "Running";
         }
