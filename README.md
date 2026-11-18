@@ -58,6 +58,10 @@ The header has buttons for Teamcraft (opens the imported list, or the cart as a 
   farm gemstones and buy, vendor, by hand, not crafted. At the bottom, a live strip shows the pipeline steps,
   what is happening right now (the item being bought, the recipe and count being crafted, GatherBuddy's
   auto-gather status) and what comes next.
+- **History**: the last 30 runs: start, duration, result (done / failed / stopped), the cart, the final summary and a
+  time-stamped log of every step.
+- Saved carts (top of the **Cart** tab): save the current cart under a name, then load it instead of the current one,
+  add it to the current one, or delete it.
 - **Jobs**: job priority for FATE farming: up/down arrows, on/off, level and gearset.
 - **Settings**: extra gemstones, AFG zone on/off, vendor purchases on/off, craft after buying, retainers,
   Artisan off/on, resume mode, idle wait, AFG soft-stop timeout.
@@ -98,7 +102,7 @@ https://github.com/Amletick/CraftMeThis/releases/latest/download/repo.json
 ## Release
 
 ```
-python publish.py 0.13.0
+python publish.py 0.14.0
 ```
 
 This builds the plugin, bumps the version, pushes and creates a GitHub release with `latest.zip` and `repo.json`.

@@ -65,6 +65,10 @@ public sealed class Configuration : IPluginConfiguration
     public int MobFarmMaxMinutes { get; set; } = 60;
     /// <summary>During the mob farm, set RSR's Engage to "all targets in range" for the farm job, so it starts fights itself.</summary>
     public bool RsrEngageAll { get; set; } = true;
+    /// <summary>Past runs, newest first (History tab).</summary>
+    public List<RunRecord> History { get; set; } = new();
+    /// <summary>Carts saved under a name (Cart tab).</summary>
+    public List<SavedCart> SavedCarts { get; set; } = new();
 }
 
 /// <summary>How a raw material is obtained.</summary>
@@ -196,6 +200,12 @@ public sealed class Plugin : IDalamudPlugin
             Data.GetSubrowExcelSheet<GilShopItem>());
         Jobs.Normalize(Config.Jobs);
 
+        // Runs left "running" by a plugin reload or game exit.
+        foreach (var r in Config.History.Where(r => r.Result == "running"))
+        {
+            r.Result = "stopped";
+            r.Summary = "Прервано: плагин или игра перезапустились посреди запуска.";
+        }
         Gc = new GcFarm(this);
         englishItems = Data.GetExcelSheet<Item>(ClientLanguage.English);
         window = new MainWindow(this);
@@ -567,6 +577,7 @@ public sealed class Plugin : IDalamudPlugin
             SetStatus(Phase.Done, "Докрафт: всё из корзины уже в сумке, делать нечего.");
             return;
         }
+        BeginRun();
         if (Plan.Gems == 0 || Gems >= Target || !Config.BuyFromVendors)
         {
             EnterBuying();
@@ -1187,6 +1198,104 @@ public sealed class Plugin : IDalamudPlugin
         Phase = phase;
         Status = text;
         Print(text);
+        LogRun(phase, text);
+    }
+
+    // ---------------------------------------------------------------- history
+
+    private const int HistoryLimit = 30;
+    private RunRecord? currentRun;
+
+    private void BeginRun()
+    {
+        currentRun = new RunRecord
+        {
+            Started = DateTime.Now,
+            Cart = EffectiveCart().Select(c => $"{Planner.RecipeName(c.RecipeId)} ×{c.Crafts}").ToList(),
+        };
+        Config.History.Insert(0, currentRun);
+        if (Config.History.Count > HistoryLimit) Config.History.RemoveRange(HistoryLimit, Config.History.Count - HistoryLimit);
+        SaveConfig();
+    }
+
+    /// <summary>Every status change of a run goes into its log; a final phase closes the record.</summary>
+    private void LogRun(Phase phase, string text)
+    {
+        if (currentRun == null) return;
+        currentRun.Events.Add(new RunEvent { Time = DateTime.Now, Phase = PhaseName(phase), Text = text });
+        if (phase is Phase.Done or Phase.Failed or Phase.Idle)
+        {
+            currentRun.Ended = DateTime.Now;
+            currentRun.Result = phase switch { Phase.Done => "done", Phase.Failed => "failed", _ => "stopped" };
+            currentRun.Summary = text;
+            currentRun = null;
+        }
+        SaveConfig();
+    }
+
+    internal static string PhaseName(Phase p) => p switch
+    {
+        Phase.Preparing => "подготовка",
+        Phase.Farming => "фарм FATE",
+        Phase.Stopping => "остановка AFG",
+        Phase.GcFarming => "печати GC",
+        Phase.Buying => "покупки",
+        Phase.AfgBuying => "биколоры (AFG)",
+        Phase.MobFarming => "фарм мобов",
+        Phase.Crafting => "крафт",
+        Phase.Done => "готово",
+        Phase.Failed => "ошибка",
+        _ => "ожидание",
+    };
+
+    internal void ClearHistory()
+    {
+        Config.History.RemoveAll(r => r != currentRun);
+        SaveConfig();
+    }
+
+    // ---------------------------------------------------------------- saved carts
+
+    internal string SaveCart(string name)
+    {
+        name = name.Trim();
+        if (name.Length == 0) return "Дай корзине имя.";
+        if (Config.Cart.Count == 0) return "Корзина пуста — нечего сохранять.";
+        var saved = new SavedCart
+        {
+            Name = name, Saved = DateTime.Now,
+            Cart = Config.Cart.Select(c => new CartEntry { RecipeId = c.RecipeId, Crafts = c.Crafts }).ToList(),
+            TeamcraftListUrl = Config.TeamcraftListUrl,
+            ImportManual = new List<string>(Config.ImportManual),
+        };
+        var i = Config.SavedCarts.FindIndex(s => s.Name.Equals(name, StringComparison.OrdinalIgnoreCase));
+        if (i >= 0) Config.SavedCarts[i] = saved; else Config.SavedCarts.Insert(0, saved);
+        SaveConfig();
+        return i >= 0 ? $"Корзина «{name}» перезаписана." : $"Корзина «{name}» сохранена.";
+    }
+
+    internal string LoadCart(SavedCart saved, bool replace)
+    {
+        if (Running) return "Сначала останови запуск.";
+        if (replace)
+        {
+            Config.Cart.Clear();
+            Config.ImportManual.Clear();
+            Config.TeamcraftListUrl = saved.TeamcraftListUrl;
+            Config.ResumeFinals = false;
+        }
+        foreach (var c in saved.Cart) AddToCart(c.RecipeId, c.Crafts, save: false);
+        foreach (var m in saved.ImportManual) if (!Config.ImportManual.Contains(m)) Config.ImportManual.Add(m);
+        SaveConfig();
+        Recalculate();
+        SyncVulcanList();
+        return replace ? $"Загружена корзина «{saved.Name}»." : $"Корзина «{saved.Name}» добавлена к текущей.";
+    }
+
+    internal void DeleteCart(SavedCart saved)
+    {
+        Config.SavedCarts.Remove(saved);
+        SaveConfig();
     }
 
     private static void Print(string text) => Chat.Print($"[CraftMeThis] {text}");

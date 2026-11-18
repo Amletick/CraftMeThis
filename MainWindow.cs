@@ -44,6 +44,7 @@ public sealed class MainWindow : Window
             if (ImGui.BeginTabItem($"  Материалы ({p.Materials.Count})  ")) { Scroll("materials", DrawMaterials); ImGui.EndTabItem(); }
             if (ImGui.BeginTabItem("  Дерево  ")) { DrawTree(); ImGui.EndTabItem(); }
             if (ImGui.BeginTabItem("  Классы  ")) { DrawJobs(); ImGui.EndTabItem(); }
+            if (ImGui.BeginTabItem($"  История ({p.Config.History.Count})  ")) { Scroll("history", DrawHistory); ImGui.EndTabItem(); }
             if (ImGui.BeginTabItem("  Настройки  ")) { Scroll("settings", DrawSettings); ImGui.EndTabItem(); }
             ImGui.EndTabBar();
         }
@@ -305,8 +306,44 @@ public sealed class MainWindow : Window
 
     // ---------------------------------------------------------------- cart
 
+    private string saveName = string.Empty;
+
+    private void DrawSavedCarts()
+    {
+        Ui.BeginCard("saved");
+        Ui.Caption($"Сохранённые корзины · {p.Config.SavedCarts.Count}");
+        ImGui.SetNextItemWidth(220);
+        ImGui.InputTextWithHint("##savename", "имя корзины", ref saveName, 64);
+        ImGui.SameLine();
+        ImGui.BeginDisabled(p.Config.Cart.Count == 0 || saveName.Trim().Length == 0);
+        if (Ui.IconButton(FontAwesomeIcon.Save, "Сохранить текущую")) p.CartMessage = p.SaveCart(saveName);
+        ImGui.EndDisabled();
+
+        SavedCart? delete = null;
+        foreach (var s in p.Config.SavedCarts)
+        {
+            ImGui.PushID(s.Name);
+            var crafts = s.Cart.Sum(c => c.Crafts);
+            if (Ui.IconButton(FontAwesomeIcon.FolderOpen, "", "Загрузить вместо текущей")) p.CartMessage = p.LoadCart(s, true);
+            ImGui.SameLine();
+            if (Ui.IconButton(FontAwesomeIcon.Plus, "", "Добавить к текущей")) p.CartMessage = p.LoadCart(s, false);
+            ImGui.SameLine();
+            if (Ui.IconButton(FontAwesomeIcon.Trash, "", "Удалить")) delete = s;
+            ImGui.SameLine();
+            ImGui.TextUnformatted(s.Name);
+            ImGui.SameLine();
+            ImGui.TextColored(Ui.Muted, $"· {s.Cart.Count} рец., {crafts} крафт. · {s.Saved:dd.MM HH:mm}");
+            if (ImGui.IsItemHovered())
+                ImGui.SetTooltip(string.Join("\n", s.Cart.Select(c => $"{p.Planner.RecipeName(c.RecipeId)} ×{c.Crafts}")));
+            ImGui.PopID();
+        }
+        if (delete != null) p.DeleteCart(delete);
+        Ui.EndCard();
+    }
+
     private void DrawCart()
     {
+        DrawSavedCarts();
         if (Ui.BeginCard("import"))
         {
             Ui.Caption("Импорт из Teamcraft");
@@ -619,6 +656,56 @@ public sealed class MainWindow : Window
             ImGui.TreePop();
         }
         ImGui.PopID();
+    }
+
+    // ---------------------------------------------------------------- history
+
+    private void DrawHistory()
+    {
+        var runs = p.Config.History;
+        if (runs.Count == 0)
+        {
+            ImGui.TextColored(Ui.Muted, "Запусков пока не было.");
+            return;
+        }
+        if (Ui.IconButton(FontAwesomeIcon.Trash, "Очистить историю")) p.ClearHistory();
+        foreach (var r in runs.ToList())
+        {
+            ImGui.PushID(r.Started.Ticks.GetHashCode());
+            var (label, color) = r.Result switch
+            {
+                "done" => ("готово", Ui.Good),
+                "failed" => ("ошибка", Ui.Bad),
+                "stopped" => ("остановлено", Ui.Warn),
+                _ => ("идёт", Ui.Accent),
+            };
+            var dur = (r.Ended ?? DateTime.Now) - r.Started;
+            var header = $"{r.Started:dd.MM HH:mm}  ·  {(int)dur.TotalMinutes} мин  ·  {string.Join(", ", r.Cart.Take(3))}{(r.Cart.Count > 3 ? $" … (+{r.Cart.Count - 3})" : "")}";
+            Ui.BeginCard($"run{r.Started.Ticks}");
+            Ui.Pill(label, color);
+            ImGui.SameLine();
+            ImGui.TextUnformatted(header);
+            if (r.Summary.Length > 0)
+            {
+                ImGui.PushStyleColor(ImGuiCol.Text, Ui.Muted);
+                ImGui.TextWrapped(r.Summary);
+                ImGui.PopStyleColor();
+            }
+            if (ImGui.TreeNodeEx($"Журнал ({r.Events.Count})##log"))
+            {
+                foreach (var e in r.Events)
+                {
+                    ImGui.TextColored(Ui.Muted, $"{e.Time:HH:mm:ss}");
+                    ImGui.SameLine();
+                    ImGui.TextColored(Ui.Accent, e.Phase);
+                    ImGui.SameLine();
+                    ImGui.TextWrapped(e.Text);
+                }
+                ImGui.TreePop();
+            }
+            Ui.EndCard();
+            ImGui.PopID();
+        }
     }
 
     // ---------------------------------------------------------------- jobs
