@@ -69,6 +69,18 @@ def main():
     short = version[:-2] if version.endswith(".0") else version
     tag = f"v{short}"
 
+    # Two sessions publish from this folder: never release a version that is not above the latest GitHub release
+    # (0.14.1 once went out after 0.15.0, so Dalamud would not offer it as an update).
+    latest = subprocess.run(["curl", "-sL", "-m", "30", f"https://github.com/{OWNER}/{REPO}/releases/latest/download/repo.json"],
+                            capture_output=True, text=True).stdout
+    try:
+        latest_ver = json.loads(latest)[0]["AssemblyVersion"]
+    except Exception:
+        latest_ver = "0.0.0.0"
+    as_tuple = lambda v: tuple(int(x) for x in v.split("."))
+    if as_tuple(version) <= as_tuple(latest_ver) and "--force" not in sys.argv:
+        sys.exit(f"refusing to publish {version}: the latest release is already {latest_ver}. Pick a higher version.")
+
     env = {**os.environ, "DOTNET_ROOT": os.path.join(os.environ["LOCALAPPDATA"], "Microsoft", "dotnet10")}
     run(os.path.join(env["DOTNET_ROOT"], "dotnet.exe"), "build", "-c", "Release", env=env)
     shutil.copyfile(ZIP, DIST)
