@@ -65,6 +65,15 @@ public sealed class Configuration : IPluginConfiguration
     public int MobFarmMaxMinutes { get; set; } = 60;
     /// <summary>During the mob farm, set RSR's Engage to "all targets in range" for the farm job, so it starts fights itself.</summary>
     public bool RsrEngageAll { get; set; } = true;
+    // Auto-leveling (beta) — see Leveler.
+    public int LevelTarget { get; set; } = 100;
+    public string LevelTrustMode { get; set; } = "Trust_Group";
+    public int LevelGcFreeSlots { get; set; } = 25;
+    public int LevelQuestIdleSeconds { get; set; } = 45;
+    public int LevelQuestMaxMinutes { get; set; } = 300;
+    public int LevelDungeonMaxMinutes { get; set; } = 450;
+    public int LevelFateMaxMinutes { get; set; } = 120;
+    public int LevelStallMinutes { get; set; } = 10;
     /// <summary>Past runs, newest first (History tab).</summary>
     public List<RunRecord> History { get; set; } = new();
     /// <summary>Carts saved under a name (Cart tab).</summary>
@@ -117,6 +126,11 @@ public sealed class Plugin : IDalamudPlugin
     [PluginService] internal static IClientState ClientState { get; private set; } = null!;
     [PluginService] internal static IPluginLog Log { get; private set; } = null!;
     [PluginService] internal static ITextureProvider Textures { get; private set; } = null!;
+    [PluginService] internal static IObjectTable Objects { get; private set; } = null!;
+
+    internal static Plugin? Instance { get; private set; }
+    internal Leveler Leveler { get; private set; } = null!;
+    internal readonly Dependencies Deps = new();
 
     private const string Cmd = "/craftme";
     private const string CmdShort = "/cmt";
@@ -206,6 +220,8 @@ public sealed class Plugin : IDalamudPlugin
             r.Result = "stopped";
             r.Summary = "Прервано: плагин или игра перезапустились посреди запуска.";
         }
+        Instance = this;
+        Leveler = new Leveler(this);
         Gc = new GcFarm(this);
         englishItems = Data.GetExcelSheet<Item>(ClientLanguage.English);
         window = new MainWindow(this);
@@ -227,6 +243,7 @@ public sealed class Plugin : IDalamudPlugin
         Framework.Update -= OnUpdate;
         Commands.RemoveHandler(Cmd);
         Commands.RemoveHandler(CmdShort);
+        Leveler.Stop();
         afg.Restore();
         if (Phase == Phase.MobFarming) Hunter.SetAutoHunt(false);
         Hunter.Restore();
@@ -560,6 +577,11 @@ public sealed class Plugin : IDalamudPlugin
             Print("уже работает.");
             return;
         }
+        if (Leveler.Running)
+        {
+            Print("сейчас идёт автоуровень — останови его сначала.");
+            return;
+        }
         Recalculate();
         Gc = new GcFarm(this);
         if (Config.Cart.Count == 0)
@@ -717,11 +739,12 @@ public sealed class Plugin : IDalamudPlugin
             // The Vulcan window builds the list editor a frame after "/vulcan <list>".
             if (Vulcan.ShowMaterialsWindow() || DateTime.UtcNow > materialsUntil) materialsUntil = DateTime.MinValue;
         }
-        if (!Running) return;
+        if (!Running && !Leveler.Running) return;
         var now = DateTime.UtcNow;
         if (now < nextTick) return;
         nextTick = now.AddSeconds(1);
         if (!ClientState.IsLoggedIn) return;
+        if (Leveler.Running) { Leveler.Tick(now); return; }
 
         switch (Phase)
         {
@@ -1133,6 +1156,25 @@ public sealed class Plugin : IDalamudPlugin
     }
 
     internal void RunCommand(string command) => Run(command);
+
+    internal void StartLeveler()
+    {
+        if (Running) { Print("сейчас идёт крафт-запуск — останови его сначала."); return; }
+        Leveler.Start();
+    }
+
+    /// <summary>The leveler's end, kept in the run history like the craft runs.</summary>
+    internal void LevelerFinished(string why)
+    {
+        Config.History.Insert(0, new RunRecord
+        {
+            Started = DateTime.Now, Ended = DateTime.Now, Result = why.StartsWith("Готово") ? "done" : why.StartsWith("Остановлено") ? "stopped" : "failed",
+            Cart = new List<string> { "Автоуровень (beta)" }, Summary = why,
+            Events = Leveler.Log.AsEnumerable().Reverse().Select(l => new RunEvent { Time = DateTime.Now, Phase = "автоуровень", Text = l }).ToList(),
+        });
+        if (Config.History.Count > 30) Config.History.RemoveRange(30, Config.History.Count - 30);
+        SaveConfig();
+    }
 
     internal static bool IsIdleNow() => IsIdle();
 

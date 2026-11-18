@@ -58,6 +58,15 @@ The header has buttons for Teamcraft (opens the imported list, or the cart as a 
   farm gemstones and buy, vendor, by hand, not crafted. At the bottom, a live strip shows the pipeline steps,
   what is happening right now (the item being bought, the recipe and count being crafted, GatherBuddy's
   auto-gather status) and what comes next.
+- **Auto-leveling (beta)**: a port of the job-leveling SND script. It levels the current combat job: 1–14 with FATEs
+  (Auto FATE Grind, until the next quest level), then one AutoDuty leveling dungeon at a time (Trust from 71, Support as
+  fallback; autoequip and retry if no dungeon lets the job in), autoequip after each dungeon and GC turn-in when the
+  bags run low. At each class/job quest level it hands over to Questionable (`/qst start`) until the character idles.
+  A stall watchdog restarts a dungeon in which nothing happens. Job quests are the fragile part, hence beta.
+- **Dependencies**: every plugin CraftMeThis works with, with its status (running / disabled / missing). Buttons add
+  the plugin's repository to Dalamud and install it, and the (!) icon lists what to set up in that plugin. This uses
+  Dalamud's own installer internals (`ThirdRepoList`, `SetPluginReposFromConfigAsync`, `InstallPluginAsync`) through
+  reflection, and only runs when you click.
 - **History**: the last 30 runs: start, duration, result (done / failed / stopped), the cart, the final summary and a
   time-stamped log of every step.
 - Saved carts (top of the **Cart** tab): save the current cart under a name, then load it instead of the current one,
@@ -102,7 +111,7 @@ https://github.com/Amletick/CraftMeThis/releases/latest/download/repo.json
 ## Release
 
 ```
-python publish.py 0.14.0
+python publish.py 0.15.0
 ```
 
 This builds the plugin, bumps the version, pushes and creates a GitHub release with `latest.zip` and `repo.json`.

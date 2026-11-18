@@ -44,6 +44,8 @@ public sealed class MainWindow : Window
             if (ImGui.BeginTabItem($"  Материалы ({p.Materials.Count})  ")) { Scroll("materials", DrawMaterials); ImGui.EndTabItem(); }
             if (ImGui.BeginTabItem("  Дерево  ")) { DrawTree(); ImGui.EndTabItem(); }
             if (ImGui.BeginTabItem("  Классы  ")) { DrawJobs(); ImGui.EndTabItem(); }
+            if (ImGui.BeginTabItem("  Автоуровень β  ")) { Scroll("leveler", DrawLeveler); ImGui.EndTabItem(); }
+            if (ImGui.BeginTabItem("  Зависимости  ")) { Scroll("deps", DrawDeps); ImGui.EndTabItem(); }
             if (ImGui.BeginTabItem($"  История ({p.Config.History.Count})  ")) { Scroll("history", DrawHistory); ImGui.EndTabItem(); }
             if (ImGui.BeginTabItem("  Настройки  ")) { Scroll("settings", DrawSettings); ImGui.EndTabItem(); }
             ImGui.EndTabBar();
@@ -656,6 +658,135 @@ public sealed class MainWindow : Window
             ImGui.TreePop();
         }
         ImGui.PopID();
+    }
+
+    // ---------------------------------------------------------------- dependencies
+
+    private void DrawDeps()
+    {
+        ImGui.TextColored(Ui.Muted, "Плагины, с которыми работает CraftMeThis. Кнопки добавляют репозиторий в Dalamud и ставят плагин; значок (!) — что в нём настроить.");
+        var d = p.Deps;
+        if (d.Message.Length > 0)
+        {
+            ImGui.TextColored(d.Busy ? Ui.Accent : d.Message.StartsWith("Ошибка") || d.Message.StartsWith("Не ") ? Ui.Warn : Ui.Good, d.Message);
+        }
+        if (!ImGui.BeginTable("deps", 4, ImGuiTableFlags.RowBg | ImGuiTableFlags.PadOuterX | ImGuiTableFlags.BordersInnerH)) return;
+        ImGui.TableSetupColumn("Плагин", ImGuiTableColumnFlags.WidthStretch);
+        ImGui.TableSetupColumn("Статус", ImGuiTableColumnFlags.WidthFixed, 110);
+        ImGui.TableSetupColumn("", ImGuiTableColumnFlags.WidthFixed, 210);
+        ImGui.TableSetupColumn("", ImGuiTableColumnFlags.WidthFixed, 28);
+        ImGui.TableHeadersRow();
+        foreach (var dep in Dependencies.All)
+        {
+            ImGui.PushID(dep.InternalName);
+            ImGui.TableNextRow();
+            ImGui.TableNextColumn();
+            ImGui.TextUnformatted(dep.Name + (dep.Optional ? "  (по желанию)" : ""));
+            ImGui.TextColored(Ui.Muted, dep.UsedFor);
+            ImGui.TableNextColumn();
+            var st = Dependencies.StatusOf(dep);
+            var (label, color) = st switch
+            {
+                Dependencies.State.Loaded => ("работает", Ui.Good),
+                Dependencies.State.Disabled => ("выключен", Ui.Warn),
+                _ => ("не установлен", dep.Optional ? Ui.Muted : Ui.Bad),
+            };
+            Ui.Pill(label, color);
+            ImGui.TableNextColumn();
+            ImGui.BeginDisabled(d.Busy);
+            if (st == Dependencies.State.Missing)
+            {
+                if (dep.Repo != null && !Dependencies.HasRepo(dep.Repo))
+                {
+                    if (Ui.IconButton(FontAwesomeIcon.Link, "Репо", $"Добавить репозиторий в Dalamud:\n{dep.Repo}")) d.AddRepo(dep);
+                    ImGui.SameLine();
+                }
+                if (Ui.IconButton(FontAwesomeIcon.Download, "Установить", dep.Repo == null ? "Из основного репозитория Dalamud" : $"Из {dep.Repo}")) d.Install(dep);
+            }
+            else if (st == Dependencies.State.Disabled)
+            {
+                ImGui.TextColored(Ui.Muted, "включи в /xlplugins");
+            }
+            ImGui.EndDisabled();
+            ImGui.TableNextColumn();
+            Ui.Icon(FontAwesomeIcon.ExclamationCircle, Ui.Warn);
+            if (ImGui.IsItemHovered())
+            {
+                ImGui.BeginTooltip();
+                ImGui.PushTextWrapPos(ImGui.GetFontSize() * 30);
+                ImGui.TextUnformatted(dep.Name);
+                foreach (var n in dep.Notes) ImGui.TextUnformatted("• " + n);
+                if (dep.Repo != null) ImGui.TextColored(Ui.Muted, dep.Repo);
+                ImGui.PopTextWrapPos();
+                ImGui.EndTooltip();
+            }
+            ImGui.PopID();
+        }
+        ImGui.EndTable();
+    }
+
+    // ---------------------------------------------------------------- auto-leveling
+
+    private void DrawLeveler()
+    {
+        var lv = p.Leveler;
+        var c = p.Config;
+        Ui.BeginCard("lvl-warn");
+        Ui.Icon(FontAwesomeIcon.Flask, Ui.Warn);
+        ImGui.SameLine();
+        ImGui.TextColored(Ui.Warn, "Beta.");
+        ImGui.SameLine();
+        ImGui.PushStyleColor(ImGuiCol.Text, Ui.Muted);
+        ImGui.TextWrapped("Качает текущую боевую профу: 1–14 через FATE (Auto FATE Grind), дальше данжи AutoDuty по одному; на уровнях класс/джоб-квестов отдаёт управление Questionable. Джоб-квесты иногда остаются недоделанными — тогда доделай квест руками и перезапусти.");
+        ImGui.PopStyleColor();
+        Ui.EndCard();
+
+        if (lv.Running)
+        {
+            if (Ui.Primary("Остановить автоуровень", FontAwesomeIcon.Stop, Ui.Bad)) lv.Stop();
+        }
+        else
+        {
+            ImGui.BeginDisabled(p.Running);
+            if (Ui.Primary("Качать текущую профу", FontAwesomeIcon.ArrowUp, Ui.Accent)) p.StartLeveler();
+            ImGui.EndDisabled();
+        }
+        ImGui.TextColored(lv.Running ? Ui.Text : Ui.Muted, lv.Now);
+
+        Ui.BeginCard("lvl-set");
+        Ui.Caption("Настройки");
+        ImGui.SetNextItemWidth(120);
+        var target = c.LevelTarget;
+        if (ImGui.InputInt("До уровня", ref target)) { c.LevelTarget = Math.Clamp(target, 2, 100); p.SaveConfig(); }
+        ImGui.SetNextItemWidth(160);
+        if (ImGui.BeginCombo("Режим с 71 (Trust)", c.LevelTrustMode))
+        {
+            foreach (var mode in new[] { "Trust_Group", "Trust_Solo", "Support" })
+                if (ImGui.Selectable(mode, c.LevelTrustMode == mode)) { c.LevelTrustMode = mode; p.SaveConfig(); }
+            ImGui.EndCombo();
+        }
+        void Int(string label, int value, Action<int> set, int min, int max)
+        {
+            ImGui.SetNextItemWidth(120);
+            var v = value;
+            if (ImGui.InputInt(label, ref v)) { set(Math.Clamp(v, min, max)); p.SaveConfig(); }
+        }
+        Int("Сдавать в GC, если свободных слотов меньше (0 = никогда)", c.LevelGcFreeSlots, v => c.LevelGcFreeSlots = v, 0, 140);
+        Int("Questionable закончил, если стоим без дела, сек", c.LevelQuestIdleSeconds, v => c.LevelQuestIdleSeconds = v, 10, 600);
+        Int("Лимит квестовой фазы, мин", c.LevelQuestMaxMinutes, v => c.LevelQuestMaxMinutes = v, 5, 1000);
+        Int("Лимит одного данжа, мин", c.LevelDungeonMaxMinutes, v => c.LevelDungeonMaxMinutes = v, 30, 1000);
+        Int("Лимит FATE-фазы (1–14), мин", c.LevelFateMaxMinutes, v => c.LevelFateMaxMinutes = v, 10, 1000);
+        Int("Зависание: стоит без дела, мин", c.LevelStallMinutes, v => c.LevelStallMinutes = v, 1, 60);
+        ImGui.TextColored(Ui.Muted, "Нужны: AutoDuty, Auto FATE Grind (зоны для 1–14 выбираются в /afg), Questionable с выключенным «Run AutoDuty Leveling mode when underleveled for MSQ», для сдачи в GC — ранг 6+ и AutoRetainer.");
+        Ui.EndCard();
+
+        if (lv.Log.Count > 0)
+        {
+            Ui.BeginCard("lvl-log");
+            Ui.Caption("Журнал");
+            foreach (var line in lv.Log.Take(40)) ImGui.TextColored(Ui.Muted, line);
+            Ui.EndCard();
+        }
     }
 
     // ---------------------------------------------------------------- history
