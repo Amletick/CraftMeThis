@@ -184,6 +184,21 @@ public sealed class MainWindow : Window
             Ui.EndCard();
         }
 
+        if (p.Config.Cart.Count > 0 && Ui.BeginCard("space"))
+        {
+            if (DateTime.UtcNow - spaceAt > TimeSpan.FromSeconds(3)) { space = p.SpaceInfo(); spaceAt = DateTime.UtcNow; }
+            var fits = space.Need <= space.Free - p.Config.SpaceReserve;
+            Ui.Icon(FontAwesomeIcon.Box, fits ? Ui.Good : Ui.Warn);
+            ImGui.SameLine();
+            ImGui.TextColored(fits ? Ui.Text : Ui.Warn, $"Сумка: свободно {space.Free}, корзине нужно ~{space.Need} ячеек (запас {p.Config.SpaceReserve}).");
+            if (!fits)
+                ImGui.TextColored(Ui.Muted, p.Config.SplitBySpace
+                    ? "Не влезет целиком — будет крафтиться партиями: вещь со всеми полуфабрикатами, потом следующая."
+                    : "Не влезет целиком, а деление на партии выключено в настройках.");
+            if (p.Batching) ImGui.TextColored(Ui.Accent, $"Сейчас партия {p.BatchNo}, осталось строк: {p.BatchesLeft}.");
+            Ui.EndCard();
+        }
+
         if (p.Config.ResumeFinals && Ui.BeginCard("resume"))
         {
             Ui.Icon(FontAwesomeIcon.Redo, Ui.Warn);
@@ -1001,6 +1016,8 @@ public sealed class MainWindow : Window
     // ---------------------------------------------------------------- settings
 
     private System.Collections.Generic.List<(uint Territory, string Name, int Level, uint ItemLevel)>? gcDuties;
+    private (int Free, int Need) space;
+    private DateTime spaceAt = DateTime.MinValue;
 
     private void DrawSettings()
     {
@@ -1083,6 +1100,17 @@ public sealed class MainWindow : Window
             if (ImGui.InputInt("Максимум пробегов", ref runs)) { c.GcMaxRuns = Math.Clamp(runs, 1, 100); p.SaveConfig(); }
             ImGui.TextColored(Ui.Muted, "Пробег: /autoduty run <Support|Trust> <данж> 1 → сдача лута в GC → следующий пробег. Без автоэкипировки. Если выбранный данж недоступен на уровне класса — берётся самый высокий доступный. Более низкий данж бывает быстрее.");
             ImGui.TextColored(Ui.Muted, "Сдача (/autoduty gcturnin) идёт через AutoRetainer: нужен ранг GC 6+ и разрешённая сдача шмота в его Expert Delivery. Две сдачи подряд без печатей останавливают фарм.");
+            Ui.EndCard();
+        }
+        if (Ui.BeginCard("set-space"))
+        {
+            Ui.Caption("Место в сумке");
+            var split = c.SplitBySpace;
+            if (ImGui.Checkbox("Делить корзину на партии, если не влезает в сумку", ref split)) { c.SplitBySpace = split; p.SaveConfig(); }
+            ImGui.SetNextItemWidth(120);
+            var reserve = c.SpaceReserve;
+            if (ImGui.InputInt("Держать свободными, ячеек", ref reserve)) { c.SpaceReserve = Math.Clamp(reserve, 0, 60); p.SaveConfig(); }
+            ImGui.TextColored(Ui.Muted, "Оценка: сырьё, которое ещё надо добыть, полуфабрикаты и готовые вещи — по стекам (кристаллы не считаются). Валюты (биколоры, печати, скрипы) фармятся на всю корзину сразу, по партиям идут закупка, фарм мобов и крафт.");
             Ui.EndCard();
         }
         if (Ui.BeginCard("set-handoff"))

@@ -293,7 +293,7 @@ public sealed class VulcanLink
     }
 
     /// <summary>Starts Vulcan's gather + craft queue on a fresh ephemeral list with this name (used for scrip collectables).</summary>
-    public string? StartCraftingNamed(string name, IReadOnlyList<CartLine> lines)
+    public string? StartCraftingNamed(string name, IReadOnlyList<CartLine> lines, bool retainerRestock = false)
     {
         if (!Ready(out var err)) return err;
         try
@@ -307,6 +307,8 @@ public sealed class VulcanLink
             var lt = list.GetType();
             var add = lt.GetMethod("AddRecipe", Any, new[] { typeof(uint), typeof(int) })!;
             foreach (var l in lines) if (l.Crafts > 0) add.Invoke(list, new object[] { l.RecipeId, l.Crafts });
+            lt.GetProperty("RetainerRestock", Any)?.SetValue(list, retainerRestock);
+            lt.GetProperty("SkipIfEnough", Any)?.SetValue(list, true);
             mt.GetMethod("SaveList", Any)?.Invoke(mgr, new[] { list });
             var plan = T("GatherBuddy.Crafting.CraftingExecutionPlan").GetMethod("Create", Any, new[] { lt })!.Invoke(null, new[] { list });
             var startQ = T("GatherBuddy.Crafting.CraftingGatherBridge").GetMethod("StartQueueCraftAndGather", Any)!;

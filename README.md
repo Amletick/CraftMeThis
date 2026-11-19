@@ -45,6 +45,14 @@ CraftMeThis plans the run, picks the farm zone and job, keeps track of everythin
 8. **Report.** List what was crafted and what was not, with the ingredients that were missing. After a run with gaps,
    **resume mode** turns on: Vulcan's "Include Final Crafts" is set, so the next run only crafts what is still missing.
 
+**Batches.** Before the run CraftMeThis estimates the bag slots the cart needs (raw materials still to get,
+precrafts, finished items, by stack; crystals excluded) and what it costs in capped currencies (Bicolor Gemstones
+1500, Grand Company seals by rank — GrandCompanyRank.MaxSeals, scrips 4000 each). If the cart does not fit the free
+slots minus a reserve, or any currency would go over its cap, it is split into batches in cart order — one finished
+item with all its precrafts, then the next; a single huge line is cut to the crafts that fit. Every batch runs the
+whole pipeline (gemstones → GC seals → scrips → vendors → mob drops → craft), so currencies are farmed per batch and
+never above their caps.
+
 All changes to AFG settings (zones, class queue, level filter, shopping list, trade settings) are restored when the
 run ends or is stopped.
 

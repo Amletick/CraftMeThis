@@ -67,6 +67,10 @@ public sealed class Configuration : IPluginConfiguration
     public Dictionary<ScripKind, uint> ScripItem { get; set; } = new();
     /// <summary>Allow fish as gatherer-scrip collectables (orange gatherer scrips at 100 are mostly fish).</summary>
     public bool ScripAllowFish { get; set; } = true;
+    /// <summary>Split a cart that will not fit into the bags into batches (buy → craft one batch at a time).</summary>
+    public bool SplitBySpace { get; set; } = true;
+    /// <summary>Bag slots to keep free when sizing batches (loot, retainers, safety margin).</summary>
+    public int SpaceReserve { get; set; } = 5;
     /// <summary>Scrips tab: kind and target for a standalone farm.</summary>
     public ScripKind ScripTabKind { get; set; } = ScripKind.OrangeCrafter;
     public int ScripTabTarget { get; set; } = 1000;
@@ -177,6 +181,14 @@ public sealed class Plugin : IDalamudPlugin
     /// <summary>Scrip kinds still to farm for the cart, and whether the run is a standalone farm from the Scrips tab.</summary>
     private readonly Queue<(ScripKind Kind, int Target)> scripQueue = new();
     private bool scripStandalone, scripsDone, scripQueued;
+
+    // Batches when the cart does not fit into the bags.
+    private List<CartLine>? currentBatch;
+    private List<CartLine> remainingLines = new();
+    private bool anyBatchFailed;
+    internal int BatchNo { get; private set; }
+    internal bool Batching => currentBatch != null;
+    internal int BatchesLeft => remainingLines.Count;
     internal readonly HunterLink Hunter = new();
     private readonly Lumina.Excel.ExcelSheet<Item> englishItems;
     private List<VendorBuy> mobFarm = new();
@@ -299,7 +311,10 @@ public sealed class Plugin : IDalamudPlugin
     internal IReadOnlyList<CartLine> CartLines() => Config.Cart.Select(c => new CartLine(c.RecipeId, c.Crafts)).ToList();
 
     /// <summary>The crafts still to do: the cart itself, or in resume mode only what the bags do not cover yet (as Vulcan counts it).</summary>
-    internal IReadOnlyList<CartLine> EffectiveCart()
+    /// <summary>The crafts this step works on: the current batch while splitting, otherwise the whole (effective) cart.</summary>
+    internal IReadOnlyList<CartLine> EffectiveCart() => currentBatch ?? FullEffectiveCart();
+
+    internal IReadOnlyList<CartLine> FullEffectiveCart()
     {
         if (!Config.ResumeFinals) return CartLines();
         var lines = new List<CartLine>();
@@ -329,7 +344,7 @@ public sealed class Plugin : IDalamudPlugin
         Plan = Planner.Build(EffectiveCart(), BagCount, id => RouteOf(id) == Route.Bicolor);
         Target = (int)Math.Min(Planner.GemCap, Plan.Gems + Math.Max(0, Config.Reserve));
         if (Plan.Gems + Config.Reserve > Planner.GemCap)
-            Warnings.Add($"Корзине нужно {Plan.Gems} биколоров, а больше {Planner.GemCap} держать нельзя. Уменьши корзину или запусти её в несколько заходов.");
+            Warnings.Add($"Корзине нужно {Plan.Gems} биколоров при лимите {Planner.GemCap} — запуск сам разделит её на партии (фарм и покупка под каждую).");
 
         var gbr = IsLoaded(GatherBuddy);
         if (!gbr) Warnings.Add("GatherBuddy Reborn не загружен: покупки и крафт делает его Vulcan.");
@@ -586,8 +601,6 @@ public sealed class Plugin : IDalamudPlugin
         if (Zone?.Sold.Where(s => s.Rank > 1).ToList() is { Count: > 0 } ranked && Plan.Gems > 0)
             list.Add($"Открыть ранг {ranked.Max(s => s.Rank)} общих FATE в {Zone.Zone.Name}: без него торговец не продаст {string.Join(", ", ranked.Select(s => s.Item))}.");
 
-        if (Plan.Gems + Config.Reserve > Planner.GemCap)
-            list.Add($"Корзине нужно {Plan.Gems} биколоров, а больше {Planner.GemCap} не носить: разбей корзину на части.");
 
         if (Materials.Any(m => m.Route == Route.GcFarm) && GcFarm.DeliveryStatus().Problem is { } delivery)
             list.Add($"Настроить сдачу в GC для фарма печатей: {delivery}");
@@ -621,6 +634,7 @@ public sealed class Plugin : IDalamudPlugin
         Gc = new GcFarm(this);
         scripsDone = false;
         scripQueued = false;
+        ResetBatches();
         scripStandalone = false;
         scripQueue.Clear();
         if (Config.Cart.Count == 0)
@@ -639,6 +653,21 @@ public sealed class Plugin : IDalamudPlugin
             return;
         }
         BeginRun();
+        if (!DecideBatches()) return;
+        RunBatch();
+    }
+
+    /// <summary>
+    /// The whole pipeline for the current batch (or the whole cart): gemstones → GC seals → scrips → vendors → mob drops
+    /// → craft. Each batch starts here again, so currencies are farmed per batch and never above their caps.
+    /// </summary>
+    private void RunBatch()
+    {
+        Gc = new GcFarm(this);
+        scripsDone = false;
+        scripQueued = false;
+        scripQueue.Clear();
+        Recalculate();
         if (Plan.Gems == 0 || Gems >= Target || !Config.BuyFromVendors)
         {
             EnterBuying();
@@ -688,6 +717,7 @@ public sealed class Plugin : IDalamudPlugin
         if (Phase == Phase.Buying) Vulcan.StopVendor();
         if (Phase == Phase.GcFarming) Run("/autoduty stop");
         if (Phase == Phase.ScripFarming) Scrips.Stop();
+        ResetBatches();
         if (Phase == Phase.MobFarming) { Hunter.SetAutoHunt(false); Hunter.Restore(); RestoreRsr(); }
         if (Phase == Phase.Crafting) Vulcan.StopCrafting();
         afg.Restore();
@@ -1053,7 +1083,9 @@ public sealed class Plugin : IDalamudPlugin
                     SetStatus(Phase.Failed, "Artisan так и не выгрузился, а Vulcan не крафтит при загруженном Artisan.");
                 return;
             }
-            var err = Vulcan.StartCrafting(CartLines(), Config.UseRetainers, Config.ResumeFinals);
+            var err = currentBatch != null
+                ? Vulcan.StartCraftingNamed("CraftMeThis Batch", currentBatch, Config.UseRetainers)
+                : Vulcan.StartCrafting(CartLines(), Config.UseRetainers, Config.ResumeFinals);
             if (err != null)
             {
                 RestoreArtisan();
@@ -1101,6 +1133,20 @@ public sealed class Plugin : IDalamudPlugin
             FailedItems.Add(item);
             failed.Add($"{b.Name} {got}/{b.Expected}" + (lacking.Count > 0 ? $" (не хватает: {string.Join(", ", lacking)})" : ""));
         }
+        if (currentBatch != null)
+        {
+            anyBatchFailed |= failed.Count > 0;
+            Print($"Партия {BatchNo} готова. Скрафчено: {(done.Count > 0 ? string.Join(", ", done) : "ничего")}"
+                  + (failed.Count > 0 ? $". Не скрафчено: {string.Join("; ", failed)}." : "."));
+            if (remainingLines.Count > 0)
+            {
+                if (StartNextBatch()) RunBatch();
+                return;
+            }
+            currentBatch = null;
+            failed.Clear();
+            if (anyBatchFailed) failed.Add("часть партий — см. сообщения выше");
+        }
         // A failed run switches to resume mode, so the next start only crafts what is still missing.
         Config.ResumeFinals = failed.Count > 0;
         SaveConfig();
@@ -1141,6 +1187,13 @@ public sealed class Plugin : IDalamudPlugin
 
     /// <summary>What is happening right now, in detail, and what comes next.</summary>
     internal (string Now, List<string> Next) Activity()
+    {
+        var (now0, next0) = ActivityCore();
+        if (Batching) { now0 = $"[партия {BatchNo}] " + now0; if (BatchesLeft > 0) next0.Add($"Потом ещё партии: осталось {BatchesLeft} строк корзины"); }
+        return (now0, next0);
+    }
+
+    private (string Now, List<string> Next) ActivityCore()
     {
         var next = new List<string>();
         string ItemList(IEnumerable<VendorBuy> v) => string.Join(", ", v.Select(x => $"{x.Name} ×{Math.Max(0, x.Target - BagCount(x.ItemId))}"));
@@ -1238,6 +1291,104 @@ public sealed class Plugin : IDalamudPlugin
     }
 
     internal void RunCommand(string command) => Run(command);
+
+    private void ResetBatches()
+    {
+        currentBatch = null;
+        remainingLines = new();
+        anyBatchFailed = false;
+        BatchNo = 0;
+    }
+
+    /// <summary>Takes the next batch that fits the free bag slots; false (and Failed) when there is no room at all.</summary>
+    private bool StartNextBatch()
+    {
+        var free = Space.FreeSlots();
+        var budget = Config.SplitBySpace ? free - Config.SpaceReserve : int.MaxValue;
+        if (budget < 3)
+        {
+            SetStatus(Phase.Failed, $"В сумке свободно {free} ячеек (запас {Config.SpaceReserve}) — не во что крафтить. Освободи место и запусти снова (докрафт продолжит).");
+            Config.ResumeFinals = true;
+            SaveConfig();
+            ResetBatches();
+            return false;
+        }
+        currentBatch = Space.NextBatch(this, remainingLines, lines => Fits(lines, budget));
+        BatchNo++;
+        craftBaseline = new();
+        Recalculate();
+        Print($"Партия {BatchNo}: {string.Join(", ", currentBatch.Select(c => $"{Planner.RecipeName(c.RecipeId)} ×{c.Crafts}"))}"
+              + $" (~{Space.Estimate(this, currentBatch)} ячеек из {free} свободных, осталось строк: {remainingLines.Count}).");
+        return true;
+    }
+
+    // ---------------------------------------------------------------- currency caps
+
+    internal const int ScripCap = 4000;
+
+    /// <summary>Grand Company seal cap for the character's rank (GrandCompanyRank.MaxSeals), 90 000 when unknown.</summary>
+    internal static unsafe int GcSealCap()
+    {
+        try
+        {
+            var ps = FFXIVClientStructs.FFXIV.Client.Game.UI.PlayerState.Instance();
+            if (ps == null || ps->GrandCompany == 0) return 90000;
+            var rank = ps->GetGrandCompanyRank();
+            return Data.GetExcelSheet<GrandCompanyRank>().TryGetRow(rank, out var r) && r.MaxSeals > 0 ? (int)r.MaxSeals : 90000;
+        }
+        catch
+        {
+            return 90000;
+        }
+    }
+
+    /// <summary>What these lines cost in capped currencies: gemstones, GC seals, scrips per kind.</summary>
+    internal (long Gems, long Seals, Dictionary<ScripKind, long> Scrips) CurrencyNeeds(IReadOnlyList<CartLine> lines)
+    {
+        var plan = Planner.Build(lines, BagCount, id => RouteOf(id) == Route.Bicolor);
+        long seals = 0;
+        var scrips = new Dictionary<ScripKind, long>();
+        foreach (var (id, qty) in plan.Leaves)
+        {
+            var route = RouteOf(id, qty);
+            if (route is not (Route.Vendor or Route.GcFarm or Route.ScripFarm) || Vulcan.PriceOf(id) is not { } price) continue;
+            var cost = (long)price.Cost * qty;
+            if (price.Group == "GrandCompanySeals") seals += cost;
+            else if (price.Group == "Scrips" && ScripFarm.KindOfItem(price.CurrencyId) is { } kind) scrips[kind] = scrips.GetValueOrDefault(kind) + cost;
+        }
+        return (plan.Gems + Math.Max(0, Config.Reserve), seals, scrips);
+    }
+
+    /// <summary>Lines fit one batch: bag slots within the budget and every capped currency within its cap.</summary>
+    private bool Fits(IReadOnlyList<CartLine> lines, int slotBudget)
+    {
+        if (slotBudget != int.MaxValue && Space.Estimate(this, lines) > slotBudget) return false;
+        var (gems, seals, scrips) = CurrencyNeeds(lines);
+        return gems <= Planner.GemCap && seals <= GcSealCap() && scrips.Values.All(v => v <= ScripCap);
+    }
+
+    /// <summary>Splits the run into batches when the cart does not fit the bags or a currency cap; false if it cannot start.</summary>
+    private bool DecideBatches()
+    {
+        var full = FullEffectiveCart().ToList();
+        if (full.Count == 0) return true;
+        var free = Space.FreeSlots();
+        var slots = Space.Estimate(this, full);
+        var (gems, seals, scrips) = CurrencyNeeds(full);
+        var reasons = new List<string>();
+        if (Config.SplitBySpace && slots > free - Config.SpaceReserve) reasons.Add($"в сумке свободно {free} ячеек, а нужно ~{slots}");
+        if (gems > Planner.GemCap) reasons.Add($"биколоров нужно {gems}, лимит {Planner.GemCap}");
+        var cap = GcSealCap();
+        if (seals > cap) reasons.Add($"печатей GC нужно {seals}, лимит {cap}");
+        foreach (var (k, v) in scrips.Where(kv => kv.Value > ScripCap)) reasons.Add($"{ScripFarm.Info(k).Name.ToLowerInvariant()} скриптов нужно {v}, лимит {ScripCap}");
+        if (reasons.Count == 0) return true;
+        remainingLines = full;
+        Print($"Делю корзину на партии ({string.Join("; ", reasons)}): каждая вещь целиком со всеми полуфабрикатами, валюты фармятся под партию.");
+        return StartNextBatch();
+    }
+
+    /// <summary>Bag space for the Farm tab: free slots and what the whole cart is expected to take.</summary>
+    internal (int Free, int Need) SpaceInfo() => (Space.FreeSlots(), Space.Estimate(this, FullEffectiveCart()));
 
     /// <summary>Scrips the cart's scrip-farm materials cost, per kind (total needed, not the shortfall).</summary>
     internal List<(ScripKind Kind, int Need)> ScripNeeds()
