@@ -63,6 +63,13 @@ public sealed class Configuration : IPluginConfiguration
     public int GcMaxRuns { get; set; } = 10;
     /// <summary>Dungeon (territory id) to farm GC seals in; 0 = the highest one AutoDuty allows at the job's level.</summary>
     public uint GcDutyTerritory { get; set; }
+    /// <summary>Collectable to farm per scrip kind (item id; 0/missing = best one available).</summary>
+    public Dictionary<ScripKind, uint> ScripItem { get; set; } = new();
+    /// <summary>Allow fish as gatherer-scrip collectables (orange gatherer scrips at 100 are mostly fish).</summary>
+    public bool ScripAllowFish { get; set; } = true;
+    /// <summary>Scrips tab: kind and target for a standalone farm.</summary>
+    public ScripKind ScripTabKind { get; set; } = ScripKind.OrangeCrafter;
+    public int ScripTabTarget { get; set; } = 1000;
     /// <summary>Give Hunter at most this many minutes for the mob drops.</summary>
     public int MobFarmMaxMinutes { get; set; } = 60;
     /// <summary>During the mob farm, set RSR's Engage to "all targets in range" for the farm job, so it starts fights itself.</summary>
@@ -97,6 +104,10 @@ public enum Route
     GcFarm,
     /// <summary>Mob drop farmed by Hunter (HunterV2).</summary>
     MobFarm,
+    /// <summary>Sold for crafter/gatherer scrips: scrips farmed with GatherBuddy collectables first, then Vulcan buys.</summary>
+    ScripFarm,
+    /// <summary>Sold for Allagan tomestones: Vulcan buys if there are enough, tomestones themselves are not farmed.</summary>
+    Tomes,
 }
 
 /// <summary>A raw material of the cart with its possible and chosen route.</summary>
@@ -112,7 +123,7 @@ public sealed class CartEntry
     public int Crafts { get; set; }
 }
 
-public enum Phase { Idle, Preparing, Farming, Stopping, GcFarming, Buying, AfgBuying, MobFarming, Crafting, Done, Failed }
+public enum Phase { Idle, Preparing, Farming, Stopping, GcFarming, ScripFarming, Buying, AfgBuying, MobFarming, Crafting, Done, Failed }
 
 /// <summary>A material Vulcan will buy from a vendor: target is the bag count to reach.</summary>
 public sealed record VendorBuy(uint ItemId, string Name, int Units, int Target, bool ForGemstones);
@@ -161,7 +172,11 @@ public sealed class Plugin : IDalamudPlugin
     internal List<string> Warnings { get; } = new();
     internal ZoneChoice? Zone { get; private set; }
 
-    internal bool Running => Phase is Phase.Preparing or Phase.Farming or Phase.Stopping or Phase.GcFarming or Phase.Buying or Phase.AfgBuying or Phase.MobFarming or Phase.Crafting;
+    internal bool Running => Phase is Phase.Preparing or Phase.Farming or Phase.Stopping or Phase.GcFarming or Phase.ScripFarming or Phase.Buying or Phase.AfgBuying or Phase.MobFarming or Phase.Crafting;
+    internal ScripFarm Scrips { get; private set; } = null!;
+    /// <summary>Scrip kinds still to farm for the cart, and whether the run is a standalone farm from the Scrips tab.</summary>
+    private readonly Queue<(ScripKind Kind, int Target)> scripQueue = new();
+    private bool scripStandalone, scripsDone, scripQueued;
     internal readonly HunterLink Hunter = new();
     private readonly Lumina.Excel.ExcelSheet<Item> englishItems;
     private List<VendorBuy> mobFarm = new();
@@ -225,6 +240,7 @@ public sealed class Plugin : IDalamudPlugin
         Instance = this;
         Leveler = new Leveler(this);
         Gc = new GcFarm(this);
+        Scrips = new ScripFarm(this);
         englishItems = Data.GetExcelSheet<Item>(ClientLanguage.English);
         window = new MainWindow(this);
         windows.AddWindow(window);
@@ -324,7 +340,7 @@ public sealed class Plugin : IDalamudPlugin
             .Concat(Plan.Leaves.Select(kv => MaterialOf(kv.Key, kv.Value)))
             .OrderBy(m => m.Route).ThenByDescending(m => m.Missing).ToList();
         VendorBuys = Plan.Purchases.Select(p => new VendorBuy(p.ItemId, p.Name, p.Units, BagCount(p.ItemId) + p.Units, true)).ToList();
-        foreach (var m in Materials.Where(m => m.Route is Route.Vendor or Route.GcFarm))
+        foreach (var m in Materials.Where(m => m.Route is Route.Vendor or Route.GcFarm or Route.ScripFarm or Route.Tomes))
             VendorBuys.Add(new VendorBuy(m.ItemId, m.Name, m.Missing, m.Have + m.Missing, false));
 
         Zone = Config.ZoneOverride != 0 && Zones.Get(Config.ZoneOverride) is { } manual
@@ -349,7 +365,12 @@ public sealed class Plugin : IDalamudPlugin
         if (Planner.HasGemOffer(itemId)) options.Add(Route.Bicolor);
         if (src == Source.Vendor || (!Planner.HasGemOffer(itemId) && IsLoaded(GatherBuddy) && Vulcan.CanBuy(itemId))) options.Add(Route.Vendor);
         // Sold for Grand Company seals: the seals can be farmed with AutoDuty first.
-        if (options.Contains(Route.Vendor) && IsLoaded(GatherBuddy) && Vulcan.PriceOf(itemId)?.Group == "GrandCompanySeals") options.Add(Route.GcFarm);
+        var vp = options.Contains(Route.Vendor) && IsLoaded(GatherBuddy) ? Vulcan.PriceOf(itemId) : null;
+        if (vp?.Group == "GrandCompanySeals") options.Add(Route.GcFarm);
+        // Sold for crafter/gatherer scrips: the scrips can be farmed with collectables first.
+        if (vp?.Group == "Scrips" && ScripFarm.KindOfItem(vp.CurrencyId) != null) options.Add(Route.ScripFarm);
+        // Sold for tomestones: marked separately ("Tomes" instead of a plain vendor).
+        if (vp?.Group == "Tomestones") { options.Remove(Route.Vendor); options.Insert(0, Route.Tomes); }
         // A mob drop Hunter knows (its mob database: who drops it and where).
         if (IsLoaded(HunterLink.InternalName) && Hunter.DroppedBy(EnglishName(itemId)).Count > 0) options.Add(Route.MobFarm);
         options.Add(Route.Market);
@@ -366,7 +387,7 @@ public sealed class Plugin : IDalamudPlugin
         if (Config.Routes.TryGetValue(itemId, out var r) && options.Contains(r)) return r;
         foreach (var o in options)
         {
-            if (o == Route.Vendor && missing > 0 && !CanAfford(itemId, missing, out _)) continue;
+            if (o is Route.Vendor or Route.Tomes && missing > 0 && !CanAfford(itemId, missing, out _)) continue;
             return o;
         }
         return Route.Market;
@@ -389,7 +410,7 @@ public sealed class Plugin : IDalamudPlugin
         var options = RouteOptions(itemId);
         string? priceText = null, shortage = null;
         var affordable = true;
-        if (options.Contains(Route.Vendor) && IsLoaded(GatherBuddy) && Vulcan.PriceOf(itemId) is { } price)
+        if ((options.Contains(Route.Vendor) || options.Contains(Route.Tomes)) && IsLoaded(GatherBuddy) && Vulcan.PriceOf(itemId) is { } price)
         {
             priceText = $"{price.Cost} {price.CurrencyName}" + (price.Vendor.Length > 0 ? $" · {price.Vendor}" : "");
             affordable = CanAfford(itemId, missing, out shortage);
@@ -413,6 +434,8 @@ public sealed class Plugin : IDalamudPlugin
         Route.Vendor => "Вендор",
         Route.GcFarm => "Фарм печатей GC",
         Route.MobFarm => "Фарм мобов (Hunter)",
+        Route.ScripFarm => "Фарм скриптов",
+        Route.Tomes => "За томстоуны",
         _ => "Рынок / вручную",
     };
 
@@ -569,6 +592,11 @@ public sealed class Plugin : IDalamudPlugin
         if (Materials.Any(m => m.Route == Route.GcFarm) && GcFarm.DeliveryStatus().Problem is { } delivery)
             list.Add($"Настроить сдачу в GC для фарма печатей: {delivery}");
 
+        var tomes = Materials.Where(m => m.Route is Route.Tomes or Route.Market && m.Options.Contains(Route.Tomes) && !m.Affordable)
+                             .Select(m => $"{m.Name} ({m.Shortage})").ToList();
+        if (tomes.Count > 0)
+            list.Add($"Набрать томстоуны (рулетки, хант, Wonderous Tails — сам плагин их не фармит): {string.Join(", ", tomes)}.");
+
         var poor = Materials.Where(m => m.Route == Route.Vendor && !m.Affordable).Select(m => $"{m.Name} ({m.Shortage})").ToList();
         if (poor.Count > 0)
             list.Add($"Не хватает валюты у вендора (трайба, печати GC, скрипы…): {string.Join(", ", poor)}. Добудь валюту или переключи путь.");
@@ -591,6 +619,10 @@ public sealed class Plugin : IDalamudPlugin
         }
         Recalculate();
         Gc = new GcFarm(this);
+        scripsDone = false;
+        scripQueued = false;
+        scripStandalone = false;
+        scripQueue.Clear();
         if (Config.Cart.Count == 0)
         {
             SetStatus(Phase.Idle, "Корзина пуста: импортируй список на вкладке «Корзина».");
@@ -655,6 +687,7 @@ public sealed class Plugin : IDalamudPlugin
         if (Farming) Run("/afg stop");
         if (Phase == Phase.Buying) Vulcan.StopVendor();
         if (Phase == Phase.GcFarming) Run("/autoduty stop");
+        if (Phase == Phase.ScripFarming) Scrips.Stop();
         if (Phase == Phase.MobFarming) { Hunter.SetAutoHunt(false); Hunter.Restore(); RestoreRsr(); }
         if (Phase == Phase.Crafting) Vulcan.StopCrafting();
         afg.Restore();
@@ -666,6 +699,34 @@ public sealed class Plugin : IDalamudPlugin
     {
         Recalculate();
         // Grand Company seals first, if a GC purchase is short of them and AutoDuty can farm them.
+        // Crafter/gatherer scrips next, one kind after another.
+        if (Config.BuyFromVendors && !scripsDone && (Gc.Finished || GcSeals().Have >= GcSeals().Need || !Materials.Any(m => m.Route == Route.GcFarm)))
+        {
+            if (!scripQueued)
+            {
+                scripQueued = true;
+                foreach (var (kind, need) in ScripNeeds())
+                    if (ScripFarm.Have(kind) < need) scripQueue.Enqueue((kind, need));
+            }
+            if (scripQueue.Count > 0)
+            {
+                if (!IsLoaded(GatherBuddy)) { scripQueue.Clear(); }
+                else
+                {
+                    var (kind, target) = scripQueue.Dequeue();
+                    var scripErr = Scrips.Begin(kind, target, Config.ScripItem.GetValueOrDefault(kind), Config.ScripAllowFish);
+                    if (scripErr == null)
+                    {
+                        SetStatus(Phase.ScripFarming, $"Фармлю скрипы ({ScripFarm.Info(kind).Name}): {ScripFarm.Have(kind)}/{target} на {Scrips.Item?.Name}.");
+                        return;
+                    }
+                    Print(scripErr + " Покупаю, на что хватает.");
+                }
+            }
+            scripsDone = scripQueue.Count == 0;
+            if (!scripsDone) { EnterBuying(); return; }
+        }
+
         var (sealsHave, sealsNeed) = GcSeals();
         if (Config.BuyFromVendors && !Gc.Finished && sealsHave < sealsNeed && Materials.Any(m => m.Route == Route.GcFarm))
         {
@@ -762,6 +823,15 @@ public sealed class Plugin : IDalamudPlugin
                 Gc.Tick(now);
                 Status = Gc.Now;
                 if (Gc.Finished) EnterBuying();
+                break;
+            case Phase.ScripFarming:
+                Scrips.Tick(now);
+                Status = Scrips.Now;
+                if (!Scrips.Running)
+                {
+                    if (scripStandalone) { scripStandalone = false; SetStatus(Phase.Done, Scrips.Now); }
+                    else EnterBuying();
+                }
                 break;
             case Phase.Buying: TickBuying(now); break;
             case Phase.AfgBuying: TickAfgBuying(now); break;
@@ -1056,6 +1126,9 @@ public sealed class Plugin : IDalamudPlugin
             ("Фарм печатей GC (AutoDuty)", Phase == Phase.GcFarming ? 1
                 : Gc.Finished || (Phase is Phase.Buying or Phase.AfgBuying or Phase.Crafting or Phase.Done && Materials.Any(m => m.Route == Route.GcFarm)) ? 2
                 : Materials.Any(m => m.Route == Route.GcFarm) ? 0 : -1),
+            ("Фарм скриптов (GatherBuddy)", Phase == Phase.ScripFarming ? 1
+                : Phase is Phase.Buying or Phase.AfgBuying or Phase.MobFarming or Phase.Crafting or Phase.Done && Materials.Any(m => m.Route == Route.ScripFarm) ? 2
+                : Materials.Any(m => m.Route == Route.ScripFarm) ? 0 : -1),
             ("Покупки у вендоров", Phase == Phase.Buying ? 1 : Phase is Phase.AfgBuying or Phase.Crafting or Phase.Done ? 2 : VendorBuys.Count > 0 ? 0 : -1),
             ("Фарм мобов (Hunter)", Phase == Phase.MobFarming ? 1 : Phase is Phase.Crafting or Phase.Done && Materials.Any(m => m.Route == Route.MobFarm) ? 2
                 : Materials.Any(m => m.Route == Route.MobFarm) ? 0 : -1),
@@ -1096,6 +1169,8 @@ public sealed class Plugin : IDalamudPlugin
                 next.Add($"Скрафтить: {crafts}");
                 return (now, next);
             }
+            case Phase.ScripFarming:
+                return (Scrips.Now, new() { $"Купить: {ItemList(toBuy)}", $"Скрафтить: {crafts}" });
             case Phase.GcFarming:
             {
                 var (h, n) = GcSeals();
@@ -1164,6 +1239,31 @@ public sealed class Plugin : IDalamudPlugin
 
     internal void RunCommand(string command) => Run(command);
 
+    /// <summary>Scrips the cart's scrip-farm materials cost, per kind (total needed, not the shortfall).</summary>
+    internal List<(ScripKind Kind, int Need)> ScripNeeds()
+    {
+        var needs = new Dictionary<ScripKind, long>();
+        foreach (var v in VendorBuys)
+        {
+            var m = Materials.FirstOrDefault(x => x.ItemId == v.ItemId);
+            if (m?.Route != Route.ScripFarm || Vulcan.PriceOf(v.ItemId) is not { } price || ScripFarm.KindOfItem(price.CurrencyId) is not { } kind) continue;
+            needs[kind] = needs.GetValueOrDefault(kind) + (long)price.Cost * Math.Max(0, v.Target - BagCount(v.ItemId));
+        }
+        return needs.Select(kv => (kv.Key, (int)Math.Min(int.MaxValue, kv.Value))).ToList();
+    }
+
+    /// <summary>Scrips tab: farm one kind of scrips up to a target, on its own.</summary>
+    internal void StartScripFarm(ScripKind kind, int target)
+    {
+        if (Running) { Print("уже работает."); return; }
+        if (!IsLoaded(GatherBuddy)) { SetStatus(Phase.Failed, "GatherBuddy Reborn не загружен."); return; }
+        var err = Scrips.Begin(kind, target, Config.ScripItem.GetValueOrDefault(kind), Config.ScripAllowFish);
+        if (err != null) { SetStatus(Phase.Failed, err); return; }
+        scripStandalone = true;
+        BeginRun();
+        SetStatus(Phase.ScripFarming, $"Фармлю скрипы ({ScripFarm.Info(kind).Name}): {ScripFarm.Have(kind)}/{target} на {Scrips.Item?.Name}.");
+    }
+
     internal int CurrentJobLevel() => Jobs.Get(Jobs.CurrentJob()) is { } j ? Jobs.Level(j) : 0;
 
     internal void StartLeveler()
@@ -1208,11 +1308,14 @@ public sealed class Plugin : IDalamudPlugin
 
     // ---------------------------------------------------------------- helpers
 
-    internal static unsafe int GemCount()
+    internal static int GemCount() => CurrencyCount(Planner.BicolorGemstone);
+
+    /// <summary>Count of a currency item (gemstones, scrips…): bags plus the currency container.</summary>
+    internal static unsafe int CurrencyCount(uint itemId)
     {
         var im = InventoryManager.Instance();
         if (im == null) return 0;
-        var count = im->GetInventoryItemCount(Planner.BicolorGemstone);
+        var count = im->GetInventoryItemCount(itemId);
         var c = im->GetInventoryContainer(InventoryType.Currency);
         if (c != null)
         {
@@ -1220,7 +1323,7 @@ public sealed class Plugin : IDalamudPlugin
             for (var i = 0; i < c->Size; i++)
             {
                 var slot = c->GetInventorySlot(i);
-                if (slot != null && slot->ItemId == Planner.BicolorGemstone) sum += slot->Quantity;
+                if (slot != null && slot->ItemId == itemId) sum += slot->Quantity;
             }
             count = Math.Max(count, sum);
         }
@@ -1290,6 +1393,7 @@ public sealed class Plugin : IDalamudPlugin
         Phase.Farming => "фарм FATE",
         Phase.Stopping => "остановка AFG",
         Phase.GcFarming => "печати GC",
+        Phase.ScripFarming => "скрипы",
         Phase.Buying => "покупки",
         Phase.AfgBuying => "биколоры (AFG)",
         Phase.MobFarming => "фарм мобов",

@@ -292,6 +292,50 @@ public sealed class VulcanLink
         }
     }
 
+    /// <summary>Starts Vulcan's gather + craft queue on a fresh ephemeral list with this name (used for scrip collectables).</summary>
+    public string? StartCraftingNamed(string name, IReadOnlyList<CartLine> lines)
+    {
+        if (!Ready(out var err)) return err;
+        try
+        {
+            var mgr = Static("CraftingListManager") ?? throw new InvalidOperationException("CraftingListManager ещё не создан");
+            var mt = mgr.GetType();
+            if (mt.GetMethod("GetListByName", Any)?.Invoke(mgr, new object[] { name }) is { } old
+                && old.GetType().GetProperty("ID", Any)?.GetValue(old) is int oldId)
+                mt.GetMethod("DeleteList", Any, new[] { typeof(int) })?.Invoke(mgr, new object[] { oldId });
+            var list = mt.GetMethod("CreateNewList", Any)!.Invoke(mgr, new object?[] { name, true, null })!;
+            var lt = list.GetType();
+            var add = lt.GetMethod("AddRecipe", Any, new[] { typeof(uint), typeof(int) })!;
+            foreach (var l in lines) if (l.Crafts > 0) add.Invoke(list, new object[] { l.RecipeId, l.Crafts });
+            mt.GetMethod("SaveList", Any)?.Invoke(mgr, new[] { list });
+            var plan = T("GatherBuddy.Crafting.CraftingExecutionPlan").GetMethod("Create", Any, new[] { lt })!.Invoke(null, new[] { list });
+            var startQ = T("GatherBuddy.Crafting.CraftingGatherBridge").GetMethod("StartQueueCraftAndGather", Any)!;
+            var consumables = lt.GetProperty("Consumables", Any)?.GetValue(list);
+            var id = (int)lt.GetProperty("ID", Any)!.GetValue(list)!;
+            startQ.Invoke(null, new[] { plan, consumables, (object?)id });
+            return null;
+        }
+        catch (Exception ex)
+        {
+            return $"Не удалось запустить крафт в Vulcan: {Inner(ex)}";
+        }
+    }
+
+    /// <summary>GatherBuddy's temporary gather list for these items (target bag counts), with auto-gather on.</summary>
+    public string? StartGather(Dictionary<uint, int> items)
+    {
+        if (!Ready(out var err)) return err;
+        try
+        {
+            T("GatherBuddy.Crafting.CraftingGatherBridge").GetMethod("CreateGatherListForMissingIngredients", Any)!.Invoke(null, new object[] { items });
+            return null;
+        }
+        catch (Exception ex)
+        {
+            return $"Не удалось запустить авто-сбор GatherBuddy: {Inner(ex)}";
+        }
+    }
+
     /// <summary>Syncs the "CraftMeThis" list and starts Vulcan's gather + craft queue on it.</summary>
     public string? StartCrafting(IReadOnlyList<CartLine> cart, bool retainerRestock, bool skipFinalIfEnough)
     {

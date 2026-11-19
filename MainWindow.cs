@@ -1,4 +1,5 @@
 using System;
+using System.Collections.Generic;
 using System.Linq;
 using System.Numerics;
 using Dalamud.Bindings.ImGui;
@@ -43,6 +44,7 @@ public sealed class MainWindow : Window
             if (ImGui.BeginTabItem($"  Корзина ({p.Config.Cart.Count})  ")) { Scroll("cart", DrawCart); ImGui.EndTabItem(); }
             if (ImGui.BeginTabItem($"  Материалы ({p.Materials.Count})  ")) { Scroll("materials", DrawMaterials); ImGui.EndTabItem(); }
             if (ImGui.BeginTabItem("  Дерево  ")) { DrawTree(); ImGui.EndTabItem(); }
+            if (ImGui.BeginTabItem("  Скрипы  ")) { Scroll("scrips", DrawScrips); ImGui.EndTabItem(); }
             if (ImGui.BeginTabItem("  Классы  ")) { DrawJobs(); ImGui.EndTabItem(); }
             if (ImGui.BeginTabItem("  Автоуровень β  ")) { Scroll("leveler", DrawLeveler); ImGui.EndTabItem(); }
             if (ImGui.BeginTabItem("  Зависимости  ")) { Scroll("deps", DrawDeps); ImGui.EndTabItem(); }
@@ -99,6 +101,7 @@ public sealed class MainWindow : Window
             Phase.Stopping => ("завершаю FATE", Ui.Warn),
             Phase.Buying => ("покупки", Ui.Accent),
             Phase.GcFarming => ("фарм печатей GC", Ui.Warn),
+            Phase.ScripFarming => ("фарм скриптов", Ui.Warn),
             Phase.MobFarming => ("фарм мобов", Ui.Bad),
             Phase.AfgBuying => ("покупка за биколоры", Ui.Gem),
             Phase.Crafting => ("крафт", Ui.Accent),
@@ -432,6 +435,8 @@ public sealed class MainWindow : Window
         (Route.Vendor, "Вендор — купит Vulcan (гил, GC, скрипы…)", FontAwesomeIcon.Store),
         (Route.GcFarm, "Печати GC — AutoDuty бегает данжи и сдаёт шмот в GC, потом купит Vulcan", FontAwesomeIcon.Dungeon),
         (Route.MobFarm, "Дроп с мобов — нафармит Hunter", FontAwesomeIcon.Skull),
+        (Route.ScripFarm, "За скрипы — нафармит коллектаблами GatherBuddy, потом купит Vulcan", FontAwesomeIcon.Scroll),
+        (Route.Tomes, "За томстоуны — купит Vulcan, если томов хватает (сами томы не фармятся)", FontAwesomeIcon.Book),
         (Route.Market, "Рынок / вручную / фарм мобов — сделать самому", FontAwesomeIcon.HandPaper),
     };
 
@@ -442,6 +447,8 @@ public sealed class MainWindow : Window
         Route.Vendor => Ui.Accent,
         Route.GcFarm => Ui.Warn,
         Route.MobFarm => Ui.Bad,
+        Route.ScripFarm => Ui.Warn,
+        Route.Tomes => Ui.Gem,
         _ => Ui.Warn,
     };
 
@@ -540,6 +547,8 @@ public sealed class MainWindow : Window
         NodeState.Vendor => (FontAwesomeIcon.Store, Ui.Accent, "купит Vulcan"),
         NodeState.GcFarm => (FontAwesomeIcon.Dungeon, Ui.Warn, "печати GC: AutoDuty"),
         NodeState.MobFarm => (FontAwesomeIcon.Skull, Ui.Bad, "нафармит Hunter"),
+        NodeState.ScripFarm => (FontAwesomeIcon.Scroll, Ui.Warn, "скрипы: коллектаблы"),
+        NodeState.Tomes => (FontAwesomeIcon.Book, Ui.Gem, "за томстоуны"),
         NodeState.Manual => (FontAwesomeIcon.HandPaper, Ui.Warn, "вручную / рынок"),
         _ => (FontAwesomeIcon.TimesCircle, Ui.Bad, "не скрафчено"),
     };
@@ -787,6 +796,97 @@ public sealed class MainWindow : Window
             foreach (var line in lv.Log.Take(40)) ImGui.TextColored(Ui.Muted, line);
             Ui.EndCard();
         }
+    }
+
+    // ---------------------------------------------------------------- scrips
+
+    private void DrawScrips()
+    {
+        var c = p.Config;
+        var running = p.Running;
+        ImGui.TextColored(Ui.Muted, "Фарм скриптов коллектаблами через GatherBuddy Reborn: крафтерские — очередь Vulcan, собирательские — авто-сбор (в т.ч. рыба). Сдача — сам GatherBuddy (Collectables). Покупки за скрипы потом делает корзина.");
+
+        // Balance and what the cart needs.
+        var needs = p.ScripNeeds().ToDictionary(n => n.Kind, n => n.Need);
+        if (ImGui.BeginTable("scripbal", 3, ImGuiTableFlags.RowBg | ImGuiTableFlags.PadOuterX))
+        {
+            ImGui.TableSetupColumn("Скрипы", ImGuiTableColumnFlags.WidthStretch);
+            ImGui.TableSetupColumn("Есть", ImGuiTableColumnFlags.WidthFixed, 70);
+            ImGui.TableSetupColumn("Нужно корзине", ImGuiTableColumnFlags.WidthFixed, 110);
+            ImGui.TableHeadersRow();
+            foreach (var k in ScripFarm.Kinds)
+            {
+                ImGui.TableNextRow();
+                ImGui.TableNextColumn();
+                Ui.GameIcon(p.Planner.ItemIcon(k.ItemId), 22);
+                ImGui.SameLine();
+                Ui.CenteredText(k.Name, 22);
+                ImGui.TableNextColumn();
+                var have = ScripFarm.Have(k.Kind);
+                var need = needs.GetValueOrDefault(k.Kind);
+                Ui.CenteredText(have.ToString(), 22, need > 0 && have < need ? Ui.Warn : Ui.Text);
+                ImGui.TableNextColumn();
+                Ui.CenteredText(need > 0 ? need.ToString() : "—", 22, Ui.Muted);
+            }
+            ImGui.EndTable();
+        }
+
+        Ui.BeginCard("scripfarm");
+        Ui.Caption("Нафармить скрипы");
+        ImGui.SetNextItemWidth(260);
+        if (ImGui.BeginCombo("Скрипы##kind", ScripFarm.Info(c.ScripTabKind).Name))
+        {
+            foreach (var k in ScripFarm.Kinds)
+                if (ImGui.Selectable(k.Name, c.ScripTabKind == k.Kind)) { c.ScripTabKind = k.Kind; p.SaveConfig(); }
+            ImGui.EndCombo();
+        }
+        ImGui.SetNextItemWidth(160);
+        var target = c.ScripTabTarget;
+        if (ImGui.InputInt("Сколько должно стать", ref target, 100)) { c.ScripTabTarget = Math.Clamp(target, 1, 4000); p.SaveConfig(); }
+        if (needs.TryGetValue(c.ScripTabKind, out var cartNeed) && cartNeed > 0)
+        {
+            ImGui.SameLine();
+            if (Ui.IconButton(FontAwesomeIcon.ShoppingCart, $"как в корзине ({cartNeed})")) { c.ScripTabTarget = cartNeed; p.SaveConfig(); }
+        }
+        var fish = c.ScripAllowFish;
+        if (ImGui.Checkbox("Разрешить рыбу для собирательских скриптов", ref fish)) { c.ScripAllowFish = fish; p.SaveConfig(); }
+
+        var options = p.Scrips.Options(c.ScripTabKind, c.ScripAllowFish);
+        var chosenId = c.ScripItem.GetValueOrDefault(c.ScripTabKind);
+        var chosen = options.FirstOrDefault(o => o.ItemId == chosenId);
+        string Label(Collectable o) => $"{o.Name}  ·  {(o.RecipeId != 0 ? p.Scrips.JobName(o.CraftJob) : o.Fish ? "FSH" : "MIN/BTN")} {o.Level}  ·  {o.Low}/{o.Mid}/{o.High}";
+        ImGui.SetNextItemWidth(-1);
+        if (ImGui.BeginCombo("##collectable", chosen != null ? Label(chosen) : options.Count > 0 ? "авто: " + Label(options[0]) : "нет подходящих коллектаблов"))
+        {
+            if (ImGui.Selectable("авто — лучший по награде", chosenId == 0)) { c.ScripItem.Remove(c.ScripTabKind); p.SaveConfig(); }
+            foreach (var o in options)
+            {
+                ImGui.PushID((int)o.ItemId);
+                if (ImGui.Selectable(Label(o), o.ItemId == chosenId)) { c.ScripItem[c.ScripTabKind] = o.ItemId; p.SaveConfig(); }
+                ImGui.PopID();
+            }
+            ImGui.EndCombo();
+        }
+        ImGui.TextColored(Ui.Muted, "Награда: низкая/средняя/высокая коллективность. Расчёт партии — по средней. Список — то, что твои классы могут сделать сейчас.");
+
+        if (running)
+        {
+            if (Ui.Primary("Остановить", FontAwesomeIcon.Stop, Ui.Bad)) p.Stop();
+        }
+        else
+        {
+            ImGui.BeginDisabled(options.Count == 0);
+            if (Ui.Primary($"Фармить до {c.ScripTabTarget}", FontAwesomeIcon.Scroll, Ui.Accent)) p.StartScripFarm(c.ScripTabKind, c.ScripTabTarget);
+            ImGui.EndDisabled();
+        }
+        if (p.Phase == Phase.ScripFarming) ImGui.TextColored(Ui.Accent, p.Scrips.Now);
+        Ui.EndCard();
+
+        Ui.BeginCard("scripnote");
+        Ui.Caption("Как это работает");
+        ImGui.TextWrapped("1) Партия: крафтерские — временный список Vulcan «CraftMeThis Scrips» с выбранным коллектаблом (Artisan выключается), собирательские — временный список авто-сбора GatherBuddy. 2) На время фарма в GatherBuddy включается «Auto turn in collectables», потом возвращается как было. 3) После партии — финальная сдача остатка. 4) Повтор, пока скриптов не станет сколько нужно (до 10 партий; две партии без прибавки — стоп).");
+        ImGui.TextColored(Ui.Muted, "В корзине материалы за скрипы получают путь «Фарм скриптов»: если скриптов не хватает, этот фарм идёт сам перед покупками. Материалы за томстоуны помечены отдельно — томы плагин не фармит.");
+        Ui.EndCard();
     }
 
     // ---------------------------------------------------------------- history

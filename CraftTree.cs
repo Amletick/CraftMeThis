@@ -34,6 +34,8 @@ public enum NodeState
     Vendor,     // raw: Vulcan vendor list
     GcFarm,     // raw: GC seals to farm with AutoDuty first
     MobFarm,    // raw: mob drop, Hunter farms it
+    ScripFarm,  // raw: scrips farmed with collectables, then bought
+    Tomes,      // raw: bought for tomestones
     Manual,     // raw: market / by hand
     Failed,     // the last craft run did not make it
 }
@@ -96,6 +98,8 @@ public static class CraftTree
                 Route.Vendor => NodeState.Vendor,
                 Route.GcFarm => NodeState.GcFarm,
                 Route.MobFarm => NodeState.MobFarm,
+                Route.ScripFarm => NodeState.ScripFarm,
+                Route.Tomes => NodeState.Tomes,
                 _ => NodeState.Manual,
             };
         }

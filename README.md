@@ -16,6 +16,9 @@ CraftMeThis plans the run, picks the farm zone and job, keeps track of everythin
    - *gather/fish*: Vulcan's queue gathers it;
    - *Bicolor*: Gemstone Trader, paid with gemstones that AFG farms;
    - *vendor*: Vulcan's vendor buy list (gil, Grand Company seals, beast tribe currencies, scrips…);
+   - *scrip farm*: items sold for crafter/gatherer scrips when the scrips are short — collectables first, then Vulcan buys;
+   - *tomestones*: items sold for tomestones are marked separately; Vulcan buys them if there are enough tomestones,
+     otherwise they go to the "will not do" panel (tomestones are not farmed);
    - *GC seal farm*: for Grand Company items when the seals are short — AutoDuty runs dungeons and turns the loot in;
    - *mob farm*: drops that **Hunter** (HunterV2) has in its mob database — it flies to the spawns and kills;
    - *by hand*: market board or mob drops.
@@ -68,6 +71,10 @@ The header has buttons for Teamcraft (opens the imported list, or the cart as a 
   the plugin's repository to Dalamud and install it, and the (!) icon lists what to set up in that plugin. This uses
   Dalamud's own installer internals (`ThirdRepoList`, `SetPluginReposFromConfigAsync`, `InstallPluginAsync`) through
   reflection, and only runs when you click.
+- **Scrips**: scrip balances (orange/purple, crafter/gatherer) and what the cart needs; farm one kind up to a target
+  with GatherBuddy collectables: crafter scrips through an ephemeral Vulcan list with the best collectable recipe your
+  crafters can make, gatherer scrips through GatherBuddy auto-gather (fish allowed optionally). GatherBuddy's own
+  "Auto turn in collectables" is switched on for the run and a final turn-in follows each batch.
 - **History**: the last 30 runs: start, duration, result (done / failed / stopped), the cart, the final summary and a
   time-stamped log of every step.
 - Saved carts (top of the **Cart** tab): save the current cart under a name, then load it instead of the current one,
