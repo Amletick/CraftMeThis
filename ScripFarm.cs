@@ -49,7 +49,7 @@ public sealed class ScripFarm
     private readonly Dictionary<uint, uint> craftJobExp = new(); // ClassJob id → ExpArrayIndex
 
     // run state
-    private enum Step { Start, Working, TurnIn, Check }
+    private enum Step { Start, Working, LeaveCraft, TurnIn, Check }
     private Step step;
     private DateTime stepAt;
     private bool? savedAutoTurnIn;
@@ -332,19 +332,61 @@ public sealed class ScripFarm
                 }
                 if (busy && have < Target) return;
                 if (TurnInRunning()) return; // GatherBuddy is already handing in
-                Go(Step.TurnIn, "Сдаю оставшиеся коллектаблы…");
+                // Vulcan reports "Queue complete" while the character still kneels at the crafting log; a turn-in
+                // started then gets its navigation stuck. Stand up first.
+                Go(Step.LeaveCraft, "Выхожу из крафта перед сдачей…");
+                leaveTries = 0;
+                return;
+            }
+
+            case Step.LeaveCraft:
+            {
+                if (InCraftingStance())
+                {
+                    if (now - stepAt > TimeSpan.FromSeconds(4 + 6 * leaveTries) && leaveTries < 3 && !Plugin.Condition[Dalamud.Game.ClientState.Conditions.ConditionFlag.ExecutingCraftingAction])
+                    {
+                        leaveTries++;
+                        p.RunCommand("/craftinglog"); // toggles the open crafting log closed: the character stands up
+                    }
+                    if (now - stepAt < TimeSpan.FromSeconds(40)) return;
+                    Stop("Персонаж так и не вышел из крафта — сдача коллектаблов не начнётся. Закрой журнал крафта и запусти снова.");
+                    return;
+                }
+                if (!Plugin.IsIdleNow() || now - stepAt < TimeSpan.FromSeconds(2)) return;
+                Go(Step.TurnIn, "Сдаю коллектаблы…");
                 turnInStarted = false;
+                turnInRestarts = 0;
                 lastTurnInTry = now;
+                turnInWindow = now;
+                turnInSig = (have, Space.CountInBags(Item.ItemId));
+                turnInSigAt = now;
                 StartTurnIn();
                 return;
             }
 
             case Step.TurnIn:
                 if (now - stepAt < TimeSpan.FromSeconds(5) || !Plugin.IsIdleNow()) return;
-                if (TurnInRunning()) { turnInStarted = true; return; }
+                if (TurnInRunning())
+                {
+                    turnInStarted = true;
+                    // A run that moves nothing (scrips, collectables in the bags) for minutes is stuck (navigation
+                    // started in a bad state…): stop it and start again, twice at most.
+                    var sig = (have, Space.CountInBags(Item.ItemId));
+                    if (sig != turnInSig) { turnInSig = sig; turnInSigAt = now; return; }
+                    if (now - turnInSigAt < TurnInStall) return;
+                    if (turnInRestarts >= 2) { StopTurnIn(); Stop($"Сдача коллектаблов висит ({TurnInStatus()}). Сдай вручную и запусти снова."); return; }
+                    turnInRestarts++;
+                    Plugin.Chat.Print($"[CraftMeThis] Сдача коллектаблов {TurnInStall.TotalMinutes:0} мин без движения — перезапускаю.");
+                    StopTurnIn();
+                    turnInSigAt = now;
+                    lastTurnInTry = now;
+                    turnInWindow = now;
+                    turnInStarted = false;
+                    return;
+                }
                 // GatherBuddy's first Start often only kicks off loading its collectables data ("still loading") and
                 // returns false: retry for a minute while collectables are still in the bags.
-                if (!turnInStarted && Space.CountInBags(Item.ItemId) > 0 && now - stepAt < TimeSpan.FromSeconds(60))
+                if (!turnInStarted && Space.CountInBags(Item.ItemId) > 0 && now - turnInWindow < TimeSpan.FromSeconds(60))
                 {
                     if (now - lastTurnInTry > TimeSpan.FromSeconds(5)) { lastTurnInTry = now; StartTurnIn(); }
                     Now = $"Сдаю коллектаблы… {TurnInStatus()}";
@@ -417,6 +459,20 @@ public sealed class ScripFarm
     }
 
     private bool turnInStarted;
+    private int leaveTries, turnInRestarts;
+    private (int, int) turnInSig;
+    private DateTime turnInSigAt, turnInWindow;
+    private static readonly TimeSpan TurnInStall = TimeSpan.FromMinutes(6);
+
+    private static bool InCraftingStance() =>
+        Plugin.Condition[Dalamud.Game.ClientState.Conditions.ConditionFlag.Crafting]
+        || Plugin.Condition[Dalamud.Game.ClientState.Conditions.ConditionFlag.PreparingToCraft];
+
+    private static void StopTurnIn()
+    {
+        try { if (CollectableManager() is { } m) m.GetType().GetMethod("Stop", Any, Type.EmptyTypes)?.Invoke(m, null); }
+        catch (Exception ex) { Plugin.Log.Warning($"GatherBuddy turn-in stop: {ex.Message}"); }
+    }
     private DateTime lastTurnInTry;
 
     /// <summary>GatherBuddy's own explanation (CollectableManager.StatusText), e.g. "still loading", "no collectables".</summary>
