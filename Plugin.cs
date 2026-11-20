@@ -378,6 +378,8 @@ public sealed class Plugin : IDalamudPlugin
             Warnings.Add($"Часть материалов у торговца {Zone.Zone.Trader} открывается только с ранга {Zone.Sold.Max(s => s.Rank)} общих FATE в {Zone.Zone.Name}.");
         if (Materials.Any(m => m.Route == Route.GcFarm) && GcFarm.DeliveryStatus().Problem is { } delivery)
             Warnings.Add($"Фарм печатей GC не сможет сдать лут: {delivery}");
+        if (gbr && Materials.Any(m => m.Route == Route.ScripFarm) && !ScripFarm.TurnInAvailable())
+            Warnings.Add("Фарм скриптов не сможет сдать коллектаблы: " + ScripFarm.TurnInMissing);
         if (Config.SwitchJob && Zone != null && Plan.Gems > Gems && Jobs.Pick(Config.Jobs, Zone.Zone.MinLevel) == null)
             Warnings.Add($"Нет включённого класса уровня {Zone.Zone.MinLevel}+ с гирсетом — фарм пойдёт текущим классом.");
     }

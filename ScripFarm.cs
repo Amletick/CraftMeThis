@@ -190,8 +190,26 @@ public sealed class ScripFarm
 
     // ---------------------------------------------------------------- run
 
+    /// <summary>GatherBuddy's CollectableTurnInRequirements.IsAvailable: turn-ins need Allagan Tools or Allagan Item Search.</summary>
+    public static bool TurnInAvailable()
+    {
+        try
+        {
+            var inst = PluginFinder.FindPluginInstance("GatherBuddyReborn");
+            var t = inst?.GetType().Assembly.GetType("GatherBuddy.AutoGather.Collectables.CollectableTurnInRequirements");
+            return t?.GetProperty("IsAvailable", Any)?.GetValue(null) is not false;
+        }
+        catch
+        {
+            return true; // unknown: do not block
+        }
+    }
+
+    public const string TurnInMissing = "GatherBuddy не сдаёт коллектаблы без Allagan Tools или Allagan Item Search — поставь/включи один из них (вкладка «Зависимости»).";
+
     public string? Begin(ScripKind kind, int target, uint preferredItem, bool allowFish)
     {
+        if (!TurnInAvailable()) return TurnInMissing;
         var options = Options(kind, allowFish);
         if (options.Count == 0)
             return Info(kind).Crafter

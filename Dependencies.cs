@@ -70,9 +70,14 @@ public sealed class Dependencies
         {
             "Для gcturnin в AutoDuty; отдельных настроек CraftMeThis не требует.",
         }),
-        new("Allagan Tools", "InventoryTools", null, "материалы у ретейнеров (Vulcan)", true, new[]
+        new("Allagan Tools", "InventoryTools", null, "материалы у ретейнеров, сдача коллектаблов", true, new[]
         {
             "Из основного репозитория Dalamud. Нужен для «Restock from Retainers» в Vulcan.",
+            "GatherBuddy сдаёт коллектаблы (фарм скриптов) только при загруженном Allagan Tools или Allagan Item Search.",
+        }),
+        new("Allagan Item Search", "AllaganItemSearch", null, "сдача коллектаблов (скрипы), если нет Allagan Tools", true, new[]
+        {
+            "Без него или Allagan Tools GatherBuddy молча не начинает сдачу, и фарм скриптов не прибавляет.",
         }),
         new("TextAdvance", "TextAdvance", "https://github.com/NightmareXIV/MyDalamudPlugins/raw/main/pluginmaster.json", "диалоги с NPC (AFG, квесты)", true, new[]
         {

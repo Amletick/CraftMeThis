@@ -889,6 +889,7 @@ public sealed class MainWindow : Window
         if (fish && !ScripFarm.FishingAllowedInGbr())
             ImGui.TextColored(Ui.Warn, "GatherBuddy не ловит рыбу в авто-сборе, пока в его настройках выключен «Fish data collection» — рыба пропускается.");
 
+        if (!ScripFarm.TurnInAvailable()) ImGui.TextColored(Ui.Bad, ScripFarm.TurnInMissing);
         var options = p.Scrips.Options(c.ScripTabKind, c.ScripAllowFish);
         var chosenId = c.ScripItem.GetValueOrDefault(c.ScripTabKind);
         var chosen = options.FirstOrDefault(o => o.ItemId == chosenId);
