@@ -33,6 +33,28 @@ public static class Space
         return free;
     }
 
+    /// <summary>
+    /// Copies of an item in the four bags, whatever their flags. InventoryManager.GetInventoryItemCount skips
+    /// collectables, so a bag full of crafted collectables reads as 0 there.
+    /// </summary>
+    public static unsafe int CountInBags(uint itemId)
+    {
+        var im = InventoryManager.Instance();
+        if (im == null) return 0;
+        var n = 0;
+        foreach (var t in Bags)
+        {
+            var c = im->GetInventoryContainer(t);
+            if (c == null) continue;
+            for (var i = 0; i < c->Size; i++)
+            {
+                var slot = c->GetInventorySlot(i);
+                if (slot != null && slot->ItemId == itemId) n += (int)slot->Quantity;
+            }
+        }
+        return n;
+    }
+
     private static int Stacks(uint itemId, long qty)
     {
         if (qty <= 0 || itemId <= 19) return 0;

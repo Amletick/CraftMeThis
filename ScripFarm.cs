@@ -303,7 +303,7 @@ public sealed class ScripFarm
                 }
                 else
                 {
-                    var err = p.Vulcan.StartGather(new Dictionary<uint, int> { [Item.ItemId] = Math.Max(1, units) + Plugin.BagCount(Item.ItemId) });
+                    var err = p.Vulcan.StartGather(new Dictionary<uint, int> { [Item.ItemId] = Math.Max(1, units) + Space.CountInBags(Item.ItemId) });
                     if (err != null) { Stop(err); return; }
                     Go(Step.Working, $"Собираю коллектабл {Item.Name} ×{units} ради скриптов: {have}/{Target}.");
                 }
@@ -322,7 +322,7 @@ public sealed class ScripFarm
                 var q = Item.RecipeId != 0 ? p.Vulcan.QueueProgress() : null;
                 var vs = Item.RecipeId != 0 ? p.Vulcan.CraftingState : "";
                 var waiting = vs.Contains("Gather") || vs.Contains("Retainer") || vs.Contains("Raphael") || vs.Contains("Repair");
-                var progress = (have, Plugin.BagCount(Item.ItemId), q?.Index ?? 0, q?.Done ?? 0, waiting);
+                var progress = (have, Space.CountInBags(Item.ItemId), q?.Index ?? 0, q?.Done ?? 0, waiting);
                 if (progress != lastProgress || waiting || TurnInRunning()) { lastProgress = progress; lastProgressAt = now; }
                 else if (busy && have < Target && now - lastProgressAt > BatchStall)
                 {
@@ -344,13 +344,13 @@ public sealed class ScripFarm
                 if (TurnInRunning()) { turnInStarted = true; return; }
                 // GatherBuddy's first Start often only kicks off loading its collectables data ("still loading") and
                 // returns false: retry for a minute while collectables are still in the bags.
-                if (!turnInStarted && Plugin.BagCount(Item.ItemId) > 0 && now - stepAt < TimeSpan.FromSeconds(60))
+                if (!turnInStarted && Space.CountInBags(Item.ItemId) > 0 && now - stepAt < TimeSpan.FromSeconds(60))
                 {
                     if (now - lastTurnInTry > TimeSpan.FromSeconds(5)) { lastTurnInTry = now; StartTurnIn(); }
                     Now = $"Сдаю коллектаблы… {TurnInStatus()}";
                     return;
                 }
-                if (!turnInStarted && Plugin.BagCount(Item.ItemId) > 0)
+                if (!turnInStarted && Space.CountInBags(Item.ItemId) > 0)
                 {
                     Stop($"GatherBuddy не начал сдачу коллектаблов: {TurnInStatus()}. Сдай вручную (окно Collectables в GatherBuddy) и запусти снова.");
                     return;
@@ -362,7 +362,7 @@ public sealed class ScripFarm
                 if (now - stepAt < TimeSpan.FromSeconds(3)) return;
                 if (have >= Target) { Stop($"{label} скрипы: {have}/{Target} — готово."); return; }
                 idleBatches = have > before ? 0 : idleBatches + 1;
-                if (idleBatches >= 1 && Plugin.BagCount(Item.ItemId) == 0)
+                if (idleBatches >= 1 && Space.CountInBags(Item.ItemId) == 0)
                 {
                     // Nothing was made at all: this collectable does not work (materials, fishing, node), try another.
                     SwitchOrStop($"{Item.Name} не получился — скриптов не прибавилось.");
