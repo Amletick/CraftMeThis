@@ -312,12 +312,28 @@ public sealed class ScripFarm
                 if (busy && have < Target) return;
                 if (TurnInRunning()) return; // GatherBuddy is already handing in
                 Go(Step.TurnIn, "Сдаю оставшиеся коллектаблы…");
+                turnInStarted = false;
+                lastTurnInTry = now;
                 StartTurnIn();
                 return;
             }
 
             case Step.TurnIn:
-                if (now - stepAt < TimeSpan.FromSeconds(5) || TurnInRunning() || !Plugin.IsIdleNow()) return;
+                if (now - stepAt < TimeSpan.FromSeconds(5) || !Plugin.IsIdleNow()) return;
+                if (TurnInRunning()) { turnInStarted = true; return; }
+                // GatherBuddy's first Start often only kicks off loading its collectables data ("still loading") and
+                // returns false: retry for a minute while collectables are still in the bags.
+                if (!turnInStarted && Plugin.BagCount(Item.ItemId) > 0 && now - stepAt < TimeSpan.FromSeconds(60))
+                {
+                    if (now - lastTurnInTry > TimeSpan.FromSeconds(5)) { lastTurnInTry = now; StartTurnIn(); }
+                    Now = $"Сдаю коллектаблы… {TurnInStatus()}";
+                    return;
+                }
+                if (!turnInStarted && Plugin.BagCount(Item.ItemId) > 0)
+                {
+                    Stop($"GatherBuddy не начал сдачу коллектаблов: {TurnInStatus()}. Сдай вручную (окно Collectables в GatherBuddy) и запусти снова.");
+                    return;
+                }
                 Go(Step.Check, "");
                 return;
 
@@ -378,6 +394,13 @@ public sealed class ScripFarm
         SetAutoTurnIn(old);
         savedAutoTurnIn = null;
     }
+
+    private bool turnInStarted;
+    private DateTime lastTurnInTry;
+
+    /// <summary>GatherBuddy's own explanation (CollectableManager.StatusText), e.g. "still loading", "no collectables".</summary>
+    private static string TurnInStatus() =>
+        CollectableManager() is { } m && m.GetType().GetProperty("StatusText", Any)?.GetValue(m) is string s && s.Length > 0 ? s : "без объяснения";
 
     private static bool TurnInRunning() => CollectableManager() is { } m && m.GetType().GetProperty("IsRunning", Any)?.GetValue(m) is true;
 
