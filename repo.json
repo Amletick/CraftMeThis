@@ -3,7 +3,7 @@
     "Author": "Amletick",
     "Name": "CraftMeThis",
     "InternalName": "CraftMeThis",
-    "AssemblyVersion": "0.19.9.0",
+    "AssemblyVersion": "0.20.0.0",
     "Punchline": "Teamcraft list → bicolor FATE farm → LazyCrafter cart, hands-free.",
     "Description": "Craft helper around LazyCrafter: import a Teamcraft list into its cart, work out the Bicolor Gemstones the cart needs, farm them with Auto FATE Grind in the zone whose Gemstone Trader sells the materials (on the highest-priority job that fits), then start the LazyCrafter cart so it buys from the trader instead of the market board. Requires LazyCrafter and Auto FATE Grind.",
     "ApplicableVersion": "any",
@@ -20,8 +20,8 @@
     "IsHide": false,
     "IsTestingExclusive": false,
     "DownloadCount": 0,
-    "DownloadLinkInstall": "https://github.com/Amletick/CraftMeThis/releases/download/v0.19.9/latest.zip",
-    "DownloadLinkUpdate": "https://github.com/Amletick/CraftMeThis/releases/download/v0.19.9/latest.zip",
-    "DownloadLinkTesting": "https://github.com/Amletick/CraftMeThis/releases/download/v0.19.9/latest.zip"
+    "DownloadLinkInstall": "https://github.com/Amletick/CraftMeThis/releases/download/v0.20.0/latest.zip",
+    "DownloadLinkUpdate": "https://github.com/Amletick/CraftMeThis/releases/download/v0.20.0/latest.zip",
+    "DownloadLinkTesting": "https://github.com/Amletick/CraftMeThis/releases/download/v0.20.0/latest.zip"
   }
 ]

@@ -21,8 +21,8 @@ public sealed record Collectable(uint ItemId, string Name, ScripKind Kind, int L
 ///  * crafter scrips — an ephemeral Vulcan crafting list with the best collectable recipe the job can make;
 ///  * gatherer scrips — GatherBuddy's temporary gather list (CraftingGatherBridge.CreateGatherListForMissingIngredients)
 ///    with the best collectable the gatherer level allows, auto-gather on;
-///  * turn-ins — GatherBuddy's own (CollectableConfig.AutoTurnInCollectables during the run, then a final
-///    CollectableManager.Start for what is left), until the scrip count reaches the target.
+///  * turn-ins — after each batch, once the character stands up: GatherBuddy's "Run Turn-Ins Now"
+///    (CollectableManager.Start()); CraftMeThis does not touch its auto turn-in setting. Repeat until the target.
 /// Purchases are not done here: the cart's vendor list (Vulcan) buys with the scrips afterwards.
 /// </summary>
 public sealed class ScripFarm
@@ -52,7 +52,6 @@ public sealed class ScripFarm
     private enum Step { Start, Working, TurnIn, Check }
     private Step step;
     private DateTime stepAt;
-    private bool? savedAutoTurnIn;
     private int batches, idleBatches;
     private int before;
     private readonly HashSet<uint> tried = new();
@@ -230,8 +229,6 @@ public sealed class ScripFarm
         batches = idleBatches = 0;
         Finished = false;
         Running = true;
-        var err = SetAutoTurnIn(true);
-        if (err != null) { Running = false; return err; }
         Go(Step.Start, "");
         return null;
     }
@@ -241,7 +238,6 @@ public sealed class ScripFarm
         if (!Running) return;
         p.Vulcan.StopCrafting();
         SetAutoGather(false);
-        RestoreAutoTurnIn();
         Running = false;
         Finished = true;
         if (why != null) { Now = why; Plugin.Chat.Print($"[CraftMeThis] {why}"); }
@@ -331,17 +327,37 @@ public sealed class ScripFarm
                     busy = false;
                 }
                 if (busy && have < Target) return;
-                // Turn-ins are GatherBuddy's own job (AutoTurnInCollectables is on during the farm): just wait for it.
-                Go(Step.TurnIn, "Жду, пока GatherBuddy сдаст коллектаблы…");
+                Go(Step.TurnIn, "Жду, пока персонаж выйдет из крафта, потом сдача в GatherBuddy…");
+                turnInPressed = false;
+                standTried = false;
                 return;
             }
 
             case Step.TurnIn:
-                // Give GatherBuddy time to start its turn-in after the queue, then wait until it is done.
-                if (TurnInRunning()) { stepAt = now; Now = "GatherBuddy сдаёт коллектаблы…"; return; }
-                if (now - stepAt < TimeSpan.FromSeconds(30) || !Plugin.IsIdleNow()) return;
+            {
+                // GatherBuddy may already be handing in (its own auto turn-in, if the user has it on): wait.
+                if (TurnInRunning()) { turnInPressed = true; stepAt = now; Now = "GatherBuddy сдаёт коллектаблы и покупает по своему списку…"; return; }
+                if (!turnInPressed)
+                {
+                    // Vulcan says "Queue complete" while the character may still kneel at the crafting log; a turn-in
+                    // started then gets stuck on its way. Wait until it stands (close the log once if it does not).
+                    if (InCraftingStance())
+                    {
+                        if (!standTried && now - stepAt > TimeSpan.FromSeconds(20)) { standTried = true; p.RunCommand("/craftinglog"); }
+                        return;
+                    }
+                    if (!Plugin.IsIdleNow() || now - stepAt < TimeSpan.FromSeconds(3)) return;
+                    if (Space.CountInBags(Item.ItemId) == 0) { Go(Step.Check, ""); return; }
+                    // The same as GatherBuddy's "Run Turn-Ins Now" button (CollectableManager.Start()).
+                    PressTurnIns();
+                    turnInPressed = true;
+                    stepAt = now;
+                    return;
+                }
+                if (now - stepAt < TimeSpan.FromSeconds(10) || !Plugin.IsIdleNow()) return;
                 Go(Step.Check, "");
                 return;
+            }
 
             case Step.Check:
                 if (now - stepAt < TimeSpan.FromSeconds(3)) return;
@@ -376,30 +392,7 @@ public sealed class ScripFarm
         return gb?.GetProperty("CollectableManager", Any)?.GetValue(null);
     }
 
-    private string? SetAutoTurnIn(bool on)
-    {
-        try
-        {
-            var cfg = GbrConfig() ?? throw new InvalidOperationException("нет GatherBuddy.Config");
-            var cc = cfg.GetType().GetProperty("CollectableConfig", Any)?.GetValue(cfg) ?? throw new InvalidOperationException("нет CollectableConfig");
-            var prop = cc.GetType().GetProperty("AutoTurnInCollectables", Any) ?? throw new InvalidOperationException("нет AutoTurnInCollectables");
-            savedAutoTurnIn ??= prop.GetValue(cc) as bool?;
-            prop.SetValue(cc, on);
-            cfg.GetType().GetMethod("Save", Any, Type.EmptyTypes)?.Invoke(cfg, null);
-            return null;
-        }
-        catch (Exception ex)
-        {
-            return $"Не удалось включить сдачу коллектаблов в GatherBuddy: {(ex as TargetInvocationException)?.InnerException?.Message ?? ex.Message}";
-        }
-    }
 
-    private void RestoreAutoTurnIn()
-    {
-        if (savedAutoTurnIn is not { } old) return;
-        SetAutoTurnIn(old);
-        savedAutoTurnIn = null;
-    }
 
 
 
@@ -407,6 +400,27 @@ public sealed class ScripFarm
     /// <summary>GatherBuddy's own explanation (CollectableManager.StatusText), e.g. "still loading", "no collectables".</summary>
     private static string TurnInStatus() =>
         CollectableManager() is { } m && m.GetType().GetProperty("StatusText", Any)?.GetValue(m) is string s && s.Length > 0 ? s : "без объяснения";
+
+    private bool turnInPressed, standTried;
+
+    private static bool InCraftingStance() =>
+        Plugin.Condition[Dalamud.Game.ClientState.Conditions.ConditionFlag.Crafting]
+        || Plugin.Condition[Dalamud.Game.ClientState.Conditions.ConditionFlag.PreparingToCraft];
+
+    /// <summary>GatherBuddy's "Run Turn-Ins Now" button: CollectableManager.Start() with its defaults.</summary>
+    private static void PressTurnIns()
+    {
+        try
+        {
+            if (CollectableManager() is not { } m || m.GetType().GetMethod("Start", Any) is not { } start) return;
+            var args = start.GetParameters().Select(x => x.HasDefaultValue ? x.DefaultValue : (x.ParameterType.IsValueType ? Activator.CreateInstance(x.ParameterType) : null)).ToArray();
+            if (start.Invoke(m, args) is false) Plugin.Chat.Print($"[CraftMeThis] GatherBuddy не начал сдачу: {TurnInStatus()}");
+        }
+        catch (Exception ex)
+        {
+            Plugin.Log.Warning($"GatherBuddy turn-ins: {ex.Message}");
+        }
+    }
 
     private static bool TurnInRunning() => CollectableManager() is { } m && m.GetType().GetProperty("IsRunning", Any)?.GetValue(m) is true;
 
