@@ -693,6 +693,7 @@ public sealed class Plugin : IDalamudPlugin
                 bookTries[b.ItemId] = (t.Tries + 1, now);
                 Print(t.Tries == 0 ? $"Купил {b.Name} — сразу изучаю." : $"{b.Name} всё ещё не изучена — пробую ещё раз.");
                 FFXIVClientStructs.FFXIV.Client.UI.Agent.AgentInventoryContext.Instance()->UseItem(b.ItemId);
+                Log.Information($"[books] use {b.Name} on sight (try {t.Tries + 1})");
                 return; // one at a time: the use animation blocks the next one
             }
         }
@@ -702,25 +703,32 @@ public sealed class Plugin : IDalamudPlugin
         }
     }
 
+    /// <summary>
+    /// Before crafting: use the bought master books one at a time (a second use during the first one's animation is
+    /// ignored — two books bought together left one unlearned and every recipe blocked). Waits until each is learned,
+    /// up to 3 tries of 6 s each; true while still busy.
+    /// </summary>
     private unsafe bool LearnBooks(DateTime now)
     {
         var pending = BookNeeds(EffectiveCart()).Where(b => BagCount(b.ItemId) > 0).ToList();
-        if (pending.Count == 0) { learnUntil = DateTime.MinValue; return false; }
-        if (learnUntil == DateTime.MinValue)
-        {
-            learnUntil = now.AddSeconds(15);
-            foreach (var b in pending)
-            {
-                Print($"Изучаю {b.Name}.");
-                try { FFXIVClientStructs.FFXIV.Client.UI.Agent.AgentInventoryContext.Instance()->UseItem(b.ItemId); }
-                catch (Exception ex) { Log.Warning($"use book: {ex.Message}"); }
-            }
-            Status = "Изучаю мастер-книги…";
-            return true;
-        }
+        if (pending.Count == 0) { learnUntil = DateTime.MinValue; bookTries.Clear(); return false; }
         if (now < learnUntil) return true;
-        Print($"Не получилось изучить: {string.Join(", ", pending.Select(b => b.Name))}. Изучи вручную (используй книгу) — рецепты с ней пропущу.");
-        return false;
+        var b = pending.FirstOrDefault(x => bookTries.GetValueOrDefault(x.ItemId).Tries < 3);
+        if (b == null)
+        {
+            learnUntil = DateTime.MinValue;
+            Print($"Не получилось изучить: {string.Join(", ", pending.Select(x => x.Name))}. Изучи вручную (используй книгу) — рецепты с ней пропущу.");
+            return false;
+        }
+        var t = bookTries.GetValueOrDefault(b.ItemId);
+        bookTries[b.ItemId] = (t.Tries + 1, now);
+        Print(t.Tries == 0 ? $"Изучаю {b.Name}." : $"{b.Name} ещё не изучена — пробую снова.");
+        try { FFXIVClientStructs.FFXIV.Client.UI.Agent.AgentInventoryContext.Instance()->UseItem(b.ItemId); }
+        catch (Exception ex) { Log.Warning($"use book: {ex.Message}"); }
+        Log.Information($"[books] use {b.Name} (try {t.Tries + 1})");
+        learnUntil = now.AddSeconds(6);
+        Status = "Изучаю мастер-книги…";
+        return true;
     }
 
     internal List<string> ManualTasks()
@@ -942,7 +950,7 @@ public sealed class Plugin : IDalamudPlugin
             return;
         }
         craftStarted = false;
-        learnUntil = DateTime.MinValue;
+        learnUntil = DateTime.MinValue; bookTries.Clear();
         phaseStartedAt = DateTime.UtcNow;
         if (VulcanLink.ArtisanLoaded)
         {
