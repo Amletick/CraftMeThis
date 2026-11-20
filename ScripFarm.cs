@@ -232,6 +232,14 @@ public sealed class ScripFarm
         Running = true;
         var err = SetAutoTurnIn(true);
         if (err != null) { Running = false; return err; }
+        // Collectables of this kind already in the bags (a stopped run): hand them in before crafting more.
+        if (all.Any(c => c.Kind == kind && Space.CountInBags(c.ItemId) > 0))
+        {
+            before = Have(kind);
+            Go(Step.LeaveCraft, "Сначала сдаю коллектаблы, что уже в сумке…");
+            leaveTries = 0;
+            return null;
+        }
         Go(Step.Start, "");
         return null;
     }
@@ -386,13 +394,13 @@ public sealed class ScripFarm
                 }
                 // GatherBuddy's first Start often only kicks off loading its collectables data ("still loading") and
                 // returns false: retry for a minute while collectables are still in the bags.
-                if (!turnInStarted && Space.CountInBags(Item.ItemId) > 0 && now - turnInWindow < TimeSpan.FromSeconds(60))
+                if (!turnInStarted && InBags() > 0 && now - turnInWindow < TimeSpan.FromSeconds(60))
                 {
                     if (now - lastTurnInTry > TimeSpan.FromSeconds(5)) { lastTurnInTry = now; StartTurnIn(); }
                     Now = $"Сдаю коллектаблы… {TurnInStatus()}";
                     return;
                 }
-                if (!turnInStarted && Space.CountInBags(Item.ItemId) > 0)
+                if (!turnInStarted && InBags() > 0)
                 {
                     Stop($"GatherBuddy не начал сдачу коллектаблов: {TurnInStatus()}. Сдай вручную (окно Collectables в GatherBuddy) и запусти снова.");
                     return;
@@ -403,6 +411,7 @@ public sealed class ScripFarm
             case Step.Check:
                 if (now - stepAt < TimeSpan.FromSeconds(3)) return;
                 if (have >= Target) { Stop($"{label} скрипы: {have}/{Target} — готово."); return; }
+                if (batches == 0) { Go(Step.Start, $"Сдал, что было: скрипы {have}/{Target}."); return; } // only the leftovers were handed in
                 idleBatches = have > before ? 0 : idleBatches + 1;
                 if (idleBatches >= 1 && Space.CountInBags(Item.ItemId) == 0)
                 {
@@ -463,6 +472,9 @@ public sealed class ScripFarm
     private (int, int) turnInSig;
     private DateTime turnInSigAt, turnInWindow;
     private static readonly TimeSpan TurnInStall = TimeSpan.FromMinutes(6);
+
+    /// <summary>Collectables of the current kind in the bags.</summary>
+    private int InBags() => all.Where(c => c.Kind == Kind).Sum(c => Space.CountInBags(c.ItemId));
 
     private static bool InCraftingStance() =>
         Plugin.Condition[Dalamud.Game.ClientState.Conditions.ConditionFlag.Crafting]
