@@ -95,6 +95,9 @@ public sealed class ScripFarm
             if (kind.Crafter)
             {
                 if (!recipeByItem.TryGetValue(id, out var r)) continue;
+                // Vulcan crafts a collectable only when the item is always collectable (the "Rarefied …" line); it never
+                // turns on Collectable Synthesis, so e.g. Bluespirit Glaives come out as plain items nobody takes.
+                if (!items.TryGetRow(id, out var ac) || !ac.AlwaysCollectable) continue;
                 all.Add(new Collectable(id, name, kind.Kind, r.RecipeLevelTable.Value.ClassJobLevel, rw.LowReward, rw.MidReward, rw.HighReward,
                                         r.RowId, 8 + r.CraftType.RowId, false));
             }
