@@ -846,7 +846,7 @@ public sealed class Plugin : IDalamudPlugin
             {
                 scripQueued = true;
                 foreach (var (kind, need) in ScripNeeds())
-                    if (ScripFarm.Have(kind) < need) scripQueue.Enqueue((kind, need));
+                    if (ScripFarm.Have(kind) < need) scripQueue.Enqueue((kind, Math.Min(need, ScripCap)));
             }
             if (scripQueue.Count > 0)
             {
@@ -1552,6 +1552,13 @@ public sealed class Plugin : IDalamudPlugin
             var cost = (long)price.Cost * qty;
             if (price.Group == "GrandCompanySeals") seals += cost;
             else if (price.Group == "Scrips" && ScripFarm.KindOfItem(price.CurrencyId) is { } kind) scrips[kind] = scrips.GetValueOrDefault(kind) + cost;
+        }
+        // Master books the run buys: their price counts towards the caps too.
+        foreach (var b in BookNeeds(lines).Where(b => BagCount(b.ItemId) == 0))
+        {
+            if (Vulcan.PriceOf(b.ItemId) is not { } price) continue;
+            if (price.Group == "Scrips" && ScripFarm.KindOfItem(price.CurrencyId) is { } kind) scrips[kind] = scrips.GetValueOrDefault(kind) + price.Cost;
+            else if (price.Group == "GrandCompanySeals") seals += price.Cost;
         }
         return (plan.Gems + Math.Max(0, Config.Reserve), seals, scrips);
     }
