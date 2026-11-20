@@ -1639,7 +1639,9 @@ public sealed class Plugin : IDalamudPlugin
         foreach (var v in VendorBuys)
         {
             var m = Materials.FirstOrDefault(x => x.ItemId == v.ItemId);
-            if (m?.Route != Route.ScripFarm || Vulcan.PriceOf(v.ItemId) is not { } price || ScripFarm.KindOfItem(price.CurrencyId) is not { } kind) continue;
+            // Plain vendor routes count too: "auto" picks Vendor when the scrips cover that one item, but three master
+            // books at 1200 each with 1356 in hand still need a farm first (only one got bought).
+            if (m?.Route is not (Route.ScripFarm or Route.Vendor) || Vulcan.PriceOf(v.ItemId) is not { } price || ScripFarm.KindOfItem(price.CurrencyId) is not { } kind) continue;
             needs[kind] = needs.GetValueOrDefault(kind) + (long)price.Cost * Math.Max(0, v.Target - BagCount(v.ItemId));
         }
         return needs.Select(kv => (kv.Key, (int)Math.Min(int.MaxValue, kv.Value))).ToList();
