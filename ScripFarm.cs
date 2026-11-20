@@ -61,11 +61,23 @@ public sealed class ScripFarm
     private (int Scrips, int Items, int Queue, int Done, bool Waiting) lastProgress;
     private DateTime lastProgressAt;
     private static readonly TimeSpan BatchStall = TimeSpan.FromMinutes(12);
+    // several timed nodes: travel between zones plus a possible gap between windows
+    private static readonly TimeSpan GatherSetStall = TimeSpan.FromMinutes(20);
     private readonly Dictionary<uint, (DateTime At, List<uint> Missing)> missingCache = new();
 
     public ScripKind Kind { get; private set; }
     public int Target { get; private set; }
     public Collectable? Item { get; private set; }
+
+    /// <summary>
+    /// What the current batch gathers: for gatherer scrips every timed collectable whose node windows do not overlap
+    /// (orange lvl-100 nodes open 2 Eorzea hours at 0/2/4/…/10 (+12), so together they cover the whole day and
+    /// GatherBuddy always has one to go to); otherwise just <see cref="Item"/>.
+    /// </summary>
+    public List<Collectable> Set { get; private set; } = new();
+    public string SetName => Set.Count > 1 ? string.Join(", ", Set.Select(c => c.Name)) : Item?.Name ?? "";
+    // node windows of gathered items, Eorzea minutes of the day [start, end)
+    private readonly Dictionary<uint, List<(int Start, int End)>> windows = new();
     public bool Running { get; private set; }
     public bool Finished { get; private set; }
     public string Now { get; private set; } = "";
@@ -76,8 +88,13 @@ public sealed class ScripFarm
         var items = Plugin.Data.GetExcelSheet<Item>();
         var recipeByItem = Plugin.Data.GetExcelSheet<Recipe>().Where(r => r.ItemResult.RowId != 0)
                                  .GroupBy(r => r.ItemResult.RowId).ToDictionary(g => g.Key, g => g.First());
+        var itemOfGi = new Dictionary<uint, uint>();
         foreach (var g in Plugin.Data.GetExcelSheet<GatheringItem>())
+        {
             if (g.Item.RowId != 0 && g.GatheringItemLevel.IsValid) gatherLevel.TryAdd(g.Item.RowId, g.GatheringItemLevel.Value.GatheringItemLevel);
+            if (g.Item.RowId != 0) itemOfGi[g.RowId] = g.Item.RowId;
+        }
+        LoadWindows(itemOfGi);
         var fish = new HashSet<uint>(Plugin.Data.GetExcelSheet<FishParameter>().Select(f => f.Item.RowId));
         foreach (var j in Plugin.Data.GetExcelSheet<ClassJob>())
             if (j.ExpArrayIndex >= 0) craftJobExp[j.RowId] = (uint)j.ExpArrayIndex;
@@ -111,6 +128,71 @@ public sealed class ScripFarm
     }
 
     // ---------------------------------------------------------------- data
+
+    /// <summary>Timed node windows (GatheringRarePopTimeTable: start hhmm, duration h/mm) of every gathered item.</summary>
+    private void LoadWindows(Dictionary<uint, uint> itemOfGi)
+    {
+        try
+        {
+            var transient = Plugin.Data.GetExcelSheet<GatheringPointTransient>();
+            foreach (var pt in Plugin.Data.GetExcelSheet<GatheringPoint>())
+            {
+                if (!pt.GatheringPointBase.IsValid || !transient.TryGetRow(pt.RowId, out var t)) continue;
+                var pop = t.GatheringRarePopTimeTable;
+                if (pop.RowId == 0 || !pop.IsValid) continue;
+                var spans = new List<(int, int)>();
+                for (var i = 0; i < pop.Value.StartTime.Count; i++)
+                {
+                    int st = pop.Value.StartTime[i], du = pop.Value.Duration[i];
+                    if (du == 0) continue;
+                    var start = st / 100 * 60 + st % 100;
+                    spans.Add((start, start + du / 100 * 60 + du % 100));
+                }
+                if (spans.Count == 0) continue;
+                foreach (var gi in pt.GatheringPointBase.Value.Item)
+                    if (itemOfGi.TryGetValue(gi.RowId, out var item))
+                    {
+                        if (!windows.TryGetValue(item, out var list)) windows[item] = list = new();
+                        foreach (var sp in spans) if (!list.Contains(sp)) list.Add(sp);
+                    }
+            }
+        }
+        catch (Exception ex)
+        {
+            Plugin.Log.Warning($"node windows: {ex.Message}");
+        }
+    }
+
+    private static bool Overlap(List<(int Start, int End)> a, List<(int Start, int End)> b)
+    {
+        foreach (var x in a)
+        foreach (var y in b)
+            for (var shift = -1440; shift <= 1440; shift += 1440) // windows may wrap past midnight
+                if (x.Start < y.End + shift && y.Start + shift < x.End) return true;
+        return false;
+    }
+
+    /// <summary>
+    /// The batch set for a gathered collectable: it plus every other timed collectable of the kind (best payout first)
+    /// whose node windows overlap none already taken. Untimed items and crafts stay alone.
+    /// </summary>
+    private List<Collectable> BuildSet(Collectable first)
+    {
+        var set = new List<Collectable> { first };
+        if (first.RecipeId != 0 || !windows.TryGetValue(first.ItemId, out var w0)) return set;
+        var taken = new List<(int Start, int End)>(w0);
+        foreach (var o in Options(Kind, allowFish))
+        {
+            if (o.ItemId == first.ItemId || o.RecipeId != 0 || tried.Contains(o.ItemId) || !windows.TryGetValue(o.ItemId, out var w)) continue;
+            if (Overlap(taken, w)) continue;
+            set.Add(o);
+            taken.AddRange(w);
+        }
+        foreach (var c in set) tried.Add(c.ItemId);
+        return set;
+    }
+
+    private int SetBags() => Set.Sum(c => Space.CountInBags(c.ItemId));
 
     public static int Have(ScripKind kind) => Plugin.CurrencyCount(Info(kind).ItemId);
 
@@ -224,6 +306,7 @@ public sealed class ScripFarm
         preferred = preferredItem;
         tried.Clear();
         Item = PickNext();
+        if (Item != null) Set = BuildSet(Item);
         if (Item == null)
             return $"Все коллектаблы этих скриптов требуют того, что плагин не добудет: {string.Join("; ", options.Take(3).Select(o => $"{o.Name} — {MissingText(o)}"))}.";
         batches = idleBatches = 0;
@@ -261,9 +344,10 @@ public sealed class ScripFarm
         var next = PickNext();
         if (next == null) { Stop($"{why} Других подходящих коллектаблов нет — останавливаю фарм скриптов ({Have(Kind)}/{Target})."); return; }
         Item = next;
+        Set = BuildSet(next);
         idleBatches = 0;
-        Plugin.Chat.Print($"[CraftMeThis] {why} Переключаюсь с {old?.Name} на {next.Name}.");
-        Go(Step.Start, $"Переключаюсь на {next.Name}.");
+        Plugin.Chat.Print($"[CraftMeThis] {why} Переключаюсь с {old?.Name} на {SetName}.");
+        Go(Step.Start, $"Переключаюсь на {SetName}.");
     }
 
     public void Tick(DateTime now)
@@ -278,10 +362,10 @@ public sealed class ScripFarm
                 if (have >= Target) { Stop($"{label} скрипы: {have}/{Target} — хватает."); return; }
                 // The exchange refuses a turn-in that would go over the cap: with 3600 and a 600-scrip collectable
                 // nothing more can be handed in, so farming further only fills the bags.
-                var reward = Math.Max(Item.High, Item.Mid);
+                var reward = Set.Max(c => Math.Max(c.High, c.Mid));
                 if (have + reward > Plugin.ScripCap)
                 {
-                    Stop($"{label} скрипы: {have} — следующий {Item.Name} даст до {reward}, в лимит {Plugin.ScripCap} уже не влезет. Сначала трачу.");
+                    Stop($"{label} скрипы: {have} — следующий {SetName} даст до {reward}, в лимит {Plugin.ScripCap} уже не влезет. Сначала трачу.");
                     return;
                 }
                 before = have;
@@ -299,9 +383,15 @@ public sealed class ScripFarm
                 }
                 else
                 {
-                    var err = p.Vulcan.StartGather(new Dictionary<uint, int> { [Item.ItemId] = Math.Max(1, units) + Space.CountInBags(Item.ItemId) });
+                    // Turn-in happens only after the batch: keep its total payout under the cap.
+                    var mid = Set.Min(c => Math.Max(1, c.Mid));
+                    units = Math.Min((int)Math.Ceiling((Target - have) / (double)mid), Math.Max(1, (Plugin.ScripCap - have) / Math.Max(1, reward)));
+                    var each = (int)Math.Ceiling(Math.Max(1, units) / (double)Set.Count);
+                    var err = p.Vulcan.StartGather(Set.ToDictionary(c => c.ItemId, c => each + Space.CountInBags(c.ItemId)));
                     if (err != null) { Stop(err); return; }
-                    Go(Step.Working, $"Собираю коллектабл {Item.Name} ×{units} ради скриптов: {have}/{Target}.");
+                    Go(Step.Working, Set.Count > 1
+                        ? $"Собираю коллектаблы с {Set.Count} таймовых нодок по очереди окон ({SetName}), по {each} шт. ради скриптов: {have}/{Target}."
+                        : $"Собираю коллектабл {Item.Name} ×{units} ради скриптов: {have}/{Target}.");
                 }
                 return;
             }
@@ -310,7 +400,7 @@ public sealed class ScripFarm
             {
                 if (now - stepAt < TimeSpan.FromSeconds(8)) return;
                 var busy = Item.RecipeId != 0 ? p.Vulcan.CraftingRunning : AutoGatherOn();
-                Now = (Item.RecipeId != 0 ? $"Vulcan крафтит {Item.Name}" : $"Авто-сбор: {Item.Name} — {VulcanLink.AutoGatherStatus()}")
+                Now = (Item.RecipeId != 0 ? $"Vulcan крафтит {Item.Name}" : $"Авто-сбор: {SetName} — {VulcanLink.AutoGatherStatus()}")
                       + $" · скрипы {have}/{Target}";
                 if (have >= Target && Item.RecipeId == 0) SetAutoGather(false);
                 // Watchdog: neither scrips nor collectables in the bags moved for a long time: auto-gather refused the
@@ -318,11 +408,11 @@ public sealed class ScripFarm
                 var q = Item.RecipeId != 0 ? p.Vulcan.QueueProgress() : null;
                 var vs = Item.RecipeId != 0 ? p.Vulcan.CraftingState : "";
                 var waiting = vs.Contains("Gather") || vs.Contains("Retainer") || vs.Contains("Raphael") || vs.Contains("Repair");
-                var progress = (have, Space.CountInBags(Item.ItemId), q?.Index ?? 0, q?.Done ?? 0, waiting);
+                var progress = (have, SetBags(), q?.Index ?? 0, q?.Done ?? 0, waiting);
                 if (progress != lastProgress || waiting || TurnInRunning()) { lastProgress = progress; lastProgressAt = now; }
-                else if (busy && have < Target && now - lastProgressAt > BatchStall)
+                else if (busy && have < Target && now - lastProgressAt > (Set.Count > 1 ? GatherSetStall : BatchStall))
                 {
-                    Plugin.Chat.Print($"[CraftMeThis] {Item.Name}: {BatchStall.TotalMinutes:0} мин без прибавки — прерываю партию.");
+                    Plugin.Chat.Print($"[CraftMeThis] {SetName}: {(Set.Count > 1 ? GatherSetStall : BatchStall).TotalMinutes:0} мин без прибавки — прерываю партию.");
                     if (Item.RecipeId != 0) p.Vulcan.StopCrafting(); else SetAutoGather(false);
                     busy = false;
                 }
@@ -357,7 +447,7 @@ public sealed class ScripFarm
                         return;
                     }
                     if (!Plugin.IsIdleNow() || now - stepAt < TimeSpan.FromSeconds(3)) return;
-                    if (Space.CountInBags(Item.ItemId) == 0) { Go(Step.Check, ""); return; }
+                    if (SetBags() == 0) { Go(Step.Check, ""); return; }
                     // The same as GatherBuddy's "Run Turn-Ins Now" button (CollectableManager.Start()).
                     PressTurnIns();
                     turnInPressed = true;
@@ -373,10 +463,10 @@ public sealed class ScripFarm
                 if (now - stepAt < TimeSpan.FromSeconds(3)) return;
                 if (have >= Target) { Stop($"{label} скрипы: {have}/{Target} — готово."); return; }
                 idleBatches = have > before ? 0 : idleBatches + 1;
-                if (idleBatches >= 1 && Space.CountInBags(Item.ItemId) == 0)
+                if (idleBatches >= 1 && SetBags() == 0)
                 {
                     // Nothing was made at all: this collectable does not work (materials, fishing, node), try another.
-                    SwitchOrStop($"{Item.Name} не получился — скриптов не прибавилось.");
+                    SwitchOrStop($"{SetName} не получился — скриптов не прибавилось.");
                     return;
                 }
                 if (idleBatches >= 2) { Stop($"Две партии без прибавки скриптов ({have}/{Target}). Проверь сдачу коллектаблов в GatherBuddy (Collectables)."); return; }

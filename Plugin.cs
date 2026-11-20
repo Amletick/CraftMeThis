@@ -859,7 +859,7 @@ public sealed class Plugin : IDalamudPlugin
                     var scripErr = Scrips.Begin(kind, target, Config.ScripItem.GetValueOrDefault(kind), Config.ScripAllowFish);
                     if (scripErr == null)
                     {
-                        SetStatus(Phase.ScripFarming, $"Фармлю скрипы ({ScripFarm.Info(kind).Name}): {ScripFarm.Have(kind)}/{target} на {Scrips.Item?.Name}.");
+                        SetStatus(Phase.ScripFarming, $"Фармлю скрипы ({ScripFarm.Info(kind).Name}): {ScripFarm.Have(kind)}/{target} на {Scrips.SetName}.");
                         return;
                     }
                     Print(scripErr + " Покупаю, на что хватает.");
@@ -1625,7 +1625,7 @@ public sealed class Plugin : IDalamudPlugin
         if (err != null) { SetStatus(Phase.Failed, err); return; }
         scripStandalone = true;
         BeginRun();
-        SetStatus(Phase.ScripFarming, $"Фармлю скрипы ({ScripFarm.Info(kind).Name}): {ScripFarm.Have(kind)}/{target} на {Scrips.Item?.Name}.");
+        SetStatus(Phase.ScripFarming, $"Фармлю скрипы ({ScripFarm.Info(kind).Name}): {ScripFarm.Have(kind)}/{target} на {Scrips.SetName}.");
     }
 
     internal int CurrentJobLevel() => Jobs.Get(Jobs.CurrentJob()) is { } j ? Jobs.Level(j) : 0;
