@@ -846,7 +846,7 @@ public sealed class Plugin : IDalamudPlugin
             {
                 scripQueued = true;
                 foreach (var (kind, need) in ScripNeeds())
-                    if (ScripFarm.Have(kind) < need) scripQueue.Enqueue((kind, Math.Min(need, ScripCap)));
+                    if (ScripFarm.Have(kind) < need) scripQueue.Enqueue((kind, Math.Min(need, ScripLimit(kind))));
             }
             if (scripQueue.Count > 0)
             {
@@ -1523,6 +1523,12 @@ public sealed class Plugin : IDalamudPlugin
 
     internal const int ScripCap = 4000;
 
+    /// <summary>
+    /// How many scrips of a kind a batch may plan for: the cap minus one turn-in of the best collectable, because the
+    /// exchange refuses a turn-in that would overflow (3600 + 600 > 4000), so the last steps below the cap are unreachable.
+    /// </summary>
+    internal int ScripLimit(ScripKind kind) => Math.Max(500, ScripCap - Scrips.MaxReward(kind, Config.ScripAllowFish));
+
     /// <summary>Grand Company seal cap for the character's rank (GrandCompanyRank.MaxSeals), 90 000 when unknown.</summary>
     internal static unsafe int GcSealCap()
     {
@@ -1568,7 +1574,7 @@ public sealed class Plugin : IDalamudPlugin
     {
         if (slotBudget != int.MaxValue && Space.Estimate(this, lines) > slotBudget) return false;
         var (gems, seals, scrips) = CurrencyNeeds(lines);
-        return gems <= Planner.GemCap && seals <= GcSealCap() && scrips.Values.All(v => v <= ScripCap);
+        return gems <= Planner.GemCap && seals <= GcSealCap() && scrips.All(kv => kv.Value <= ScripLimit(kv.Key));
     }
 
     /// <summary>Splits the run into batches when the cart does not fit the bags or a currency cap; false if it cannot start.</summary>
@@ -1584,7 +1590,8 @@ public sealed class Plugin : IDalamudPlugin
         if (gems > Planner.GemCap) reasons.Add($"биколоров нужно {gems}, лимит {Planner.GemCap}");
         var cap = GcSealCap();
         if (seals > cap) reasons.Add($"печатей GC нужно {seals}, лимит {cap}");
-        foreach (var (k, v) in scrips.Where(kv => kv.Value > ScripCap)) reasons.Add($"{ScripFarm.Info(k).Name.ToLowerInvariant()} скриптов нужно {v}, лимит {ScripCap}");
+        foreach (var (k, v) in scrips.Where(kv => kv.Value > ScripLimit(kv.Key)))
+            reasons.Add($"{ScripFarm.Info(k).Name.ToLowerInvariant()} скриптов нужно {v}, а за раз реально набрать {ScripLimit(k)} (лимит {ScripCap} минус одна сдача)");
         if (reasons.Count == 0) return true;
         remainingLines = full;
         Print($"Делю корзину на партии ({string.Join("; ", reasons)}): каждая вещь целиком со всеми полуфабрикатами, валюты фармятся под партию.");

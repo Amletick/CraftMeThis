@@ -164,6 +164,10 @@ public sealed class ScripFarm
         return missing;
     }
 
+    /// <summary>The largest single turn-in among the collectables the farm may use for this kind (0 when none).</summary>
+    public int MaxReward(ScripKind kind, bool allowFish) =>
+        Options(kind, allowFish).Where(o => Missing(o).Count == 0).Select(o => Math.Max(o.High, o.Mid)).DefaultIfEmpty(0).Max();
+
     public string MissingText(Collectable c) => string.Join(", ", Missing(c).Select(p.Planner.ItemName));
 
     /// <summary>GatherBuddy's AutoGatherConfig.FishDataCollection: without it auto-gather drops fish from its lists.</summary>
@@ -255,6 +259,14 @@ public sealed class ScripFarm
             case Step.Start:
             {
                 if (have >= Target) { Stop($"{label} скрипы: {have}/{Target} — хватает."); return; }
+                // The exchange refuses a turn-in that would go over the cap: with 3600 and a 600-scrip collectable
+                // nothing more can be handed in, so farming further only fills the bags.
+                var reward = Math.Max(Item.High, Item.Mid);
+                if (have + reward > Plugin.ScripCap)
+                {
+                    Stop($"{label} скрипы: {have} — следующий {Item.Name} даст до {reward}, в лимит {Plugin.ScripCap} уже не влезет. Сначала трачу.");
+                    return;
+                }
                 before = have;
                 batches++;
                 lastProgress = default;
