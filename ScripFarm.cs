@@ -330,6 +330,8 @@ public sealed class ScripFarm
                 Go(Step.TurnIn, "Жду, пока персонаж выйдет из крафта, потом сдача в GatherBuddy…");
                 turnInPressed = false;
                 standTried = false;
+                standTries = 0;
+                lastStandTry = default;
                 return;
             }
 
@@ -343,7 +345,15 @@ public sealed class ScripFarm
                     // started then gets stuck on its way. Wait until it stands (close the log once if it does not).
                     if (InCraftingStance())
                     {
-                        if (!standTried && now - stepAt > TimeSpan.FromSeconds(20)) { standTried = true; p.RunCommand("/craftinglog"); }
+                        // Close the crafting log like Escape (every 10 s after the first 15 s); give up after 3 min.
+                        if (now - stepAt > TimeSpan.FromSeconds(15) && now - lastStandTry > TimeSpan.FromSeconds(10))
+                        {
+                            lastStandTry = now;
+                            standTries++;
+                            LeaveCraftingLog();
+                        }
+                        if (now - stepAt > TimeSpan.FromMinutes(3))
+                            Stop("Персонаж 3 мин не выходит из крафта (стойка у журнала рецептов) — встань сам и запусти фарм скриптов снова.");
                         return;
                     }
                     if (!Plugin.IsIdleNow() || now - stepAt < TimeSpan.FromSeconds(3)) return;
@@ -402,6 +412,29 @@ public sealed class ScripFarm
         CollectableManager() is { } m && m.GetType().GetProperty("StatusText", Any)?.GetValue(m) is string s && s.Length > 0 ? s : "без объяснения";
 
     private bool turnInPressed, standTried;
+    private int standTries;
+    private DateTime lastStandTry;
+
+    /// <summary>
+    /// Stand up from the crafting stance: hide the crafting log agent (what Escape does). If the log window is not
+    /// open, open it so the next try can close it. "/craftinglog" is a game command and Dalamud does not run it.
+    /// </summary>
+    private static unsafe void LeaveCraftingLog()
+    {
+        try
+        {
+            var agent = FFXIVClientStructs.FFXIV.Client.UI.Agent.AgentModule.Instance()->GetAgentByInternalId(
+                FFXIVClientStructs.FFXIV.Client.UI.Agent.AgentId.RecipeNote);
+            if (agent == null) return;
+            var open = agent->IsAgentActive();
+            if (open) agent->Hide(); else agent->Show();
+            Plugin.Log.Information($"[ScripFarm] leave crafting log: {(open ? "closed" : "opened")} the log");
+        }
+        catch (Exception ex)
+        {
+            Plugin.Log.Warning($"leave crafting log: {ex.Message}");
+        }
+    }
 
     private static bool InCraftingStance() =>
         Plugin.Condition[Dalamud.Game.ClientState.Conditions.ConditionFlag.Crafting]
