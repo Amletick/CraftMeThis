@@ -118,7 +118,10 @@ public enum Route
 /// <param name="Price">Vulcan's vendor offer ("7 Ixali Oaknot · Ixali vendor"), null when no vendor.</param>
 /// <param name="Affordable">Whether the currency for <see cref="Missing"/> units is there (beast tribe, GC, scrips…).</param>
 public sealed record Material(uint ItemId, string Name, int Have, int Missing, IReadOnlyList<Route> Options, Route Route, bool Chosen,
-                              string? Price = null, bool Affordable = true, string? Shortage = null);
+                              string? Price = null, bool Affordable = true, string? Shortage = null, string? Note = null);
+
+/// <summary>A master recipe book the cart needs and the character has not learned: bought (scrips…) and learned in the run.</summary>
+public sealed record BookNeed(uint BookId, uint ItemId, string Name, IReadOnlyList<uint> Recipes);
 
 [Serializable]
 public sealed class CartEntry
@@ -249,7 +252,6 @@ public sealed class Plugin : IDalamudPlugin
         Sources = new Sources(Data.GetExcelSheet<GatheringItem>(), Data.GetExcelSheet<FishParameter>(), Data.GetExcelSheet<SpearfishingItem>(),
             Data.GetSubrowExcelSheet<GilShopItem>());
         Jobs.Normalize(Config.Jobs);
-        Planner.CanCraft = id => RecipeBlockReason(id) == null;
 
         // Runs left "running" by a plugin reload or game exit.
         foreach (var r in Config.History.Where(r => r.Result == "running"))
@@ -362,6 +364,9 @@ public sealed class Plugin : IDalamudPlugin
         Materials = Plan.Purchases.Select(p => MaterialOf(p.ItemId, p.Units))
             .Concat(Plan.Leaves.Select(kv => MaterialOf(kv.Key, kv.Value)))
             .OrderBy(m => m.Route).ThenByDescending(m => m.Missing).ToList();
+        Books = BookNeeds(EffectiveCart());
+        foreach (var b in Books.Where(b => BagCount(b.ItemId) == 0 && Materials.All(m => m.ItemId != b.ItemId)))
+            Materials.Insert(0, MaterialOf(b.ItemId, 1) with { Note = $"мастер-книга для {string.Join(", ", b.Recipes.Select(Planner.RecipeName))}" });
         VendorBuys = Plan.Purchases.Select(p => new VendorBuy(p.ItemId, p.Name, p.Units, BagCount(p.ItemId) + p.Units, true)).ToList();
         foreach (var m in Materials.Where(m => m.Route is Route.Vendor or Route.GcFarm or Route.ScripFarm or Route.Tomes))
             VendorBuys.Add(new VendorBuy(m.ItemId, m.Name, m.Missing, m.Have + m.Missing, false));
@@ -605,9 +610,7 @@ public sealed class Plugin : IDalamudPlugin
         if (!ClientState.IsLoggedIn || !Data.GetExcelSheet<Recipe>().TryGetRow(recipeId, out var r)) return null;
         var ps = FFXIVClientStructs.FFXIV.Client.Game.UI.PlayerState.Instance();
         if (ps == null) return null;
-        var book = r.SecretRecipeBook.RowId;
-        if (book != 0 && !ps->IsSecretRecipeBookUnlocked(book))
-            return $"нужна книга {(r.SecretRecipeBook.IsValid ? r.SecretRecipeBook.Value.Name.ExtractText() : $"#{book}")}";
+        if (UnlearnedBook(recipeId) is { } book) return $"не изучено: {book.Name}";
         var job = 8 + r.CraftType.RowId;
         if (Data.GetExcelSheet<ClassJob>().TryGetRow(job, out var cj) && cj.ExpArrayIndex >= 0 && cj.ExpArrayIndex < ps->ClassJobLevels.Length)
         {
@@ -618,19 +621,86 @@ public sealed class Plugin : IDalamudPlugin
         return null;
     }
 
-    /// <summary>Recipes in the cart's tree the character cannot craft, with the reason (still missing ones only).</summary>
+    /// <summary>The master recipe book a recipe needs, when the character has not learned it yet.</summary>
+    internal static unsafe (uint BookId, uint ItemId, string Name)? UnlearnedBook(uint recipeId)
+    {
+        if (!ClientState.IsLoggedIn || !Data.GetExcelSheet<Recipe>().TryGetRow(recipeId, out var r)) return null;
+        var book = r.SecretRecipeBook.RowId;
+        if (book == 0 || !r.SecretRecipeBook.IsValid) return null;
+        var ps = FFXIVClientStructs.FFXIV.Client.Game.UI.PlayerState.Instance();
+        if (ps == null || ps->IsSecretRecipeBookUnlocked(book)) return null;
+        var sb = r.SecretRecipeBook.Value;
+        return (book, sb.Item.RowId, sb.Name.ExtractText());
+    }
+
+    /// <summary>Recipes in the cart's tree the character cannot craft now, with the reason (still missing ones only).</summary>
     internal List<(uint RecipeId, string Why)> BlockedRecipes(IReadOnlyList<CartLine> lines)
     {
         Planner.Build(lines, BagCount, id => RouteOf(id) == Route.Bicolor);
-        return Planner.LastBlocked.Select(id => (id, RecipeBlockReason(id) ?? "недоступен")).ToList();
+        return Planner.LastRecipes.Select(id => (id, RecipeBlockReason(id))).Where(x => x.Item2 != null).Select(x => (x.id, x.Item2!)).ToList();
+    }
+
+    /// <summary>Unlearned master books the cart's tree needs, one per book.</summary>
+    internal List<BookNeed> BookNeeds(IReadOnlyList<CartLine> lines)
+    {
+        Planner.Build(lines, BagCount, id => RouteOf(id) == Route.Bicolor);
+        var books = new Dictionary<uint, (uint Item, string Name, List<uint> Recipes)>();
+        foreach (var id in Planner.LastRecipes)
+        {
+            if (UnlearnedBook(id) is not { } b) continue;
+            if (!books.TryGetValue(b.BookId, out var e)) books[b.BookId] = e = (b.ItemId, b.Name, new List<uint>());
+            e.Recipes.Add(id);
+        }
+        return books.Select(kv => new BookNeed(kv.Key, kv.Value.Item, kv.Value.Name, kv.Value.Recipes)).ToList();
+    }
+
+    internal List<BookNeed> Books { get; private set; } = new();
+
+    /// <summary>One line for the tree: the book, its price and what is still to farm (scrips), or that it waits to be learned.</summary>
+    internal string BookLine(uint recipeId)
+    {
+        if (UnlearnedBook(recipeId) is not { } b) return "";
+        if (BagCount(b.ItemId) > 0) return $"Книга {b.Name} уже в сумке — изучу перед крафтом.";
+        if (!IsLoaded(GatherBuddy) || Vulcan.PriceOf(b.ItemId) is not { } price)
+            return $"Книга {b.Name}: у вендоров Vulcan не нашлась — купи на рынке.";
+        var have = Vulcan.CurrencyHave(price);
+        var farm = price.Group == "Scrips" ? (have >= price.Cost ? " — хватает, куплю в запуске" : $" — нафармить ещё {price.Cost - have} коллектаблами и купить в запуске") : " — куплю в запуске";
+        return $"Книга {b.Name}: {price.Cost} {price.CurrencyName} (есть {have}){farm}.";
+    }
+
+    // Learning books before crafting: use the book items that are in the bags.
+    private DateTime learnUntil = DateTime.MinValue;
+
+    /// <summary>Uses unlearned book items that are in the bags; true while waiting for the game to register them.</summary>
+    private unsafe bool LearnBooks(DateTime now)
+    {
+        var pending = BookNeeds(EffectiveCart()).Where(b => BagCount(b.ItemId) > 0).ToList();
+        if (pending.Count == 0) { learnUntil = DateTime.MinValue; return false; }
+        if (learnUntil == DateTime.MinValue)
+        {
+            learnUntil = now.AddSeconds(15);
+            foreach (var b in pending)
+            {
+                Print($"Изучаю {b.Name}.");
+                try { FFXIVClientStructs.FFXIV.Client.UI.Agent.AgentInventoryContext.Instance()->UseItem(b.ItemId); }
+                catch (Exception ex) { Log.Warning($"use book: {ex.Message}"); }
+            }
+            Status = "Изучаю мастер-книги…";
+            return true;
+        }
+        if (now < learnUntil) return true;
+        Print($"Не получилось изучить: {string.Join(", ", pending.Select(b => b.Name))}. Изучи вручную (используй книгу) — рецепты с ней пропущу.");
+        return false;
     }
 
     internal List<string> ManualTasks()
     {
         var list = new List<string>(Config.ImportManual);
-        var blockedRecipes = BlockedRecipes(FullEffectiveCart());
-        if (blockedRecipes.Count > 0)
-            list.Add($"Рецепты, которые персонаж не может крафтить (Vulcan на них зависает): {string.Join("; ", blockedRecipes.Select(b => $"{Planner.RecipeName(b.RecipeId)} — {b.Why}"))}. Выучи книгу / подними класс, или купи готовые на рынке — они в списке рынка.");
+        var levelBlocked = BlockedRecipes(FullEffectiveCart()).Where(b => UnlearnedBook(b.RecipeId) == null).ToList();
+        if (levelBlocked.Count > 0)
+            list.Add($"Не хватает уровня крафтера: {string.Join("; ", levelBlocked.Select(b => $"{Planner.RecipeName(b.RecipeId)} — {b.Why}"))}. Эти рецепты будут пропущены.");
+        foreach (var b in BookNeeds(FullEffectiveCart()))
+            list.Add($"Не изучено: {b.Name} (для {string.Join(", ", b.Recipes.Select(Planner.RecipeName))}). {BookLine(b.Recipes[0])}");
         var bought = VendorBuys.Select(v => v.ItemId).ToHashSet();
 
         var market = Materials.Where(m => m.Route == Route.Market && !bought.Contains(m.ItemId))
@@ -842,6 +912,7 @@ public sealed class Plugin : IDalamudPlugin
             return;
         }
         craftStarted = false;
+        learnUntil = DateTime.MinValue;
         phaseStartedAt = DateTime.UtcNow;
         if (VulcanLink.ArtisanLoaded)
         {
@@ -1123,6 +1194,7 @@ public sealed class Plugin : IDalamudPlugin
                     SetStatus(Phase.Failed, "Artisan так и не выгрузился, а Vulcan не крафтит при загруженном Artisan.");
                 return;
             }
+            if (LearnBooks(now)) return;
             var batchLines = currentBatch ?? CartLines();
             var craftable = new List<CartLine>();
             var skipped = new List<string>();
@@ -1133,7 +1205,7 @@ public sealed class Plugin : IDalamudPlugin
                 else skipped.Add($"{Planner.RecipeName(l.RecipeId)} ({string.Join(", ", blocked.Select(b => $"{Planner.RecipeName(b.RecipeId)}: {b.Why}"))})");
             }
             if (skipped.Count > 0)
-                Print($"Не отдаю в Vulcan то, что упирается в недоступный рецепт: {string.Join("; ", skipped)}. Купи эти полуфабрикаты на рынке или выучи книгу — потом докрафт.");
+                Print($"Не отдаю в Vulcan то, что упирается в недоступный рецепт: {string.Join("; ", skipped)}. Когда книга будет изучена — докрафт.");
             if (craftable.Count == 0)
             {
                 RestoreArtisan();

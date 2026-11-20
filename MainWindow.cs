@@ -511,6 +511,11 @@ public sealed class MainWindow : Window
                     Ui.GameIcon(p.Planner.ItemIcon(m.ItemId), RowIcon);
                     ImGui.SameLine();
                     Ui.CenteredText(m.Name, RowIcon);
+                    if (m.Note != null)
+                    {
+                        ImGui.SameLine();
+                        Ui.CenteredText("· " + m.Note, RowIcon, Ui.Warn);
+                    }
                     ImGui.TableNextColumn();
                     if (m.Price != null)
                     {
@@ -565,6 +570,7 @@ public sealed class MainWindow : Window
         NodeState.ScripFarm => (FontAwesomeIcon.Scroll, Ui.Warn, "скрипы: коллектаблы"),
         NodeState.Tomes => (FontAwesomeIcon.Book, Ui.Gem, "за томстоуны"),
         NodeState.Manual => (FontAwesomeIcon.HandPaper, Ui.Warn, "вручную / рынок"),
+        NodeState.Unlearned => (FontAwesomeIcon.BookOpen, Ui.Bad, "не изучено"),
         _ => (FontAwesomeIcon.TimesCircle, Ui.Bad, "не скрафчено"),
     };
 
@@ -675,6 +681,21 @@ public sealed class MainWindow : Window
         Ui.Icon(icon, color);
         ImGui.SameLine();
         ImGui.TextColored(color, label);
+
+        if (state == NodeState.Unlearned && p.BookLine(n.RecipeId) is { Length: > 0 } book)
+        {
+            ImGui.TableNextRow();
+            ImGui.TableNextColumn();
+            ImGui.Indent(40);
+            Ui.Icon(FontAwesomeIcon.Scroll, Ui.Warn);
+            ImGui.SameLine();
+            ImGui.PushTextWrapPos(0);
+            ImGui.TextColored(Ui.Warn, book);
+            ImGui.PopTextWrapPos();
+            ImGui.Unindent(40);
+            ImGui.TableNextColumn();
+            ImGui.TableNextColumn();
+        }
 
         if (open && !leaf)
         {

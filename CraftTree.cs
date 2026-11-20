@@ -19,6 +19,8 @@ public sealed class TreeNode
     public bool IsCartLine { get; init; }
     /// <summary>Route of a raw material.</summary>
     public Route Route { get; init; }
+    /// <summary>Recipe needs a master book the character has not learned.</summary>
+    public bool Unlearned { get; init; }
     public List<TreeNode> Children { get; } = new();
 }
 
@@ -38,6 +40,7 @@ public enum NodeState
     Tomes,      // raw: bought for tomestones
     Manual,     // raw: market / by hand
     Failed,     // the last craft run did not make it
+    Unlearned,  // recipe needs a master book that is not learned yet
 }
 
 /// <summary>Builds the cart's craft tree with bag counts, the way Vulcan works through it (precrafts it already has are skipped).</summary>
@@ -61,6 +64,7 @@ public static class CraftTree
         {
             ItemId = item, Name = p.Planner.ItemName(item), Need = need, Have = Plugin.BagCount(item),
             RecipeId = recipeId, Crafts = crafts, IsCartLine = cartLine,
+            Unlearned = Plugin.UnlearnedBook(recipeId) != null,
         };
         if (depth > 10 || crafts <= 0) return node;
         foreach (var (ing, amount) in p.Planner.Ingredients(recipeId))
@@ -104,6 +108,7 @@ public static class CraftTree
             };
         }
         if (craftingRecipe != 0 && craftingRecipe == n.RecipeId) return NodeState.Crafting;
+        if (n.Unlearned && n.Have < n.Need) return NodeState.Unlearned;
         if (n.IsCartLine)
         {
             if (crafted(n) is { } got && got >= n.Need) return NodeState.Done;

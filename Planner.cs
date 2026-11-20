@@ -76,14 +76,8 @@ public sealed class Planner
 
     public int GemOfferCount => gemOffers.Count;
 
-    /// <summary>
-    /// Whether the character can craft a recipe at all (master recipe book learned, crafter level). A missing item
-    /// whose recipe is not craftable becomes a raw material (market / by hand) instead of a precraft.
-    /// </summary>
-    public Func<uint, bool>? CanCraft { get; set; }
-
-    /// <summary>Recipes the last <see cref="Build"/> needed but the character cannot craft (see <see cref="CanCraft"/>).</summary>
-    public HashSet<uint> LastBlocked { get; private set; } = new();
+    /// <summary>Every recipe the last <see cref="Build"/> crafts (cart lines and the precrafts still missing).</summary>
+    public HashSet<uint> LastRecipes { get; private set; } = new();
 
     private readonly IEnumerable<ExcelSheet<Item>> nameSheets = Array.Empty<ExcelSheet<Item>>();
     private Dictionary<string, uint>? itemByName;
@@ -166,7 +160,7 @@ public sealed class Planner
         var needUnits = new Dictionary<uint, int>();
         var leaves = new Dictionary<uint, int>();
         var names = new List<string>();
-        var blocked = new HashSet<uint>();
+        var crafted = new HashSet<uint>();
 
         void Require(uint id, int qty, int depth)
         {
@@ -176,15 +170,9 @@ public sealed class Planner
             qty -= take;
             if (qty == 0) return;
 
-            Recipe r = default;
-            var hasRecipe = depth < 12 && recipeByItem.TryGetValue(id, out r);
-            if (hasRecipe && CanCraft?.Invoke(r.RowId) is false)
+            if (depth < 12 && recipeByItem.TryGetValue(id, out var r))
             {
-                blocked.Add(r.RowId); // not craftable by this character: buy it like a raw material
-                hasRecipe = false;
-            }
-            if (hasRecipe)
-            {
+                crafted.Add(r.RowId);
                 var crafts = (qty + r.AmountResult - 1) / r.AmountResult;
                 Craft(r, crafts, depth + 1);
                 return;
@@ -210,10 +198,10 @@ public sealed class Planner
         {
             if (line.Crafts <= 0 || !recipes.TryGetRow(line.RecipeId, out var r)) continue;
             names.Add($"{ItemName(r.ItemResult.RowId)} x{line.Crafts}");
-            if (CanCraft?.Invoke(r.RowId) is false) blocked.Add(r.RowId);
+            crafted.Add(r.RowId);
             Craft(r, line.Crafts, 0);
         }
-        LastBlocked = blocked;
+        LastRecipes = crafted;
 
         var purchases = needUnits
             .Select(kv =>
