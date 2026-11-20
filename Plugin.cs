@@ -232,6 +232,13 @@ public sealed class Plugin : IDalamudPlugin
     private bool artisanTurnedOff;
     private bool craftStarted;
 
+    // Crafting watchdog: Vulcan retrying the same craft forever (mounted, or an ingredient it cannot select).
+    private (int Index, uint Recipe, int Done, long Bags) craftSig;
+    private DateTime craftSigAt;
+    private int craftDismounts;
+    private string? craftHang;
+    private static readonly TimeSpan CraftStall = TimeSpan.FromMinutes(4);
+
     public Plugin()
     {
         Config = Pi.GetPluginConfig() as Configuration ?? new Configuration();
@@ -1096,6 +1103,11 @@ public sealed class Plugin : IDalamudPlugin
             phaseStartedAt = now;
             craftBaseline = new();
             FailedItems.Clear();
+            craftSig = default;
+            craftSigAt = now;
+            craftDismounts = 0;
+            craftHang = null;
+            WarnMissingBeforeCraft();
             foreach (var c in EffectiveCart())
             {
                 var item = Planner.RecipeItem(c.RecipeId);
@@ -1110,10 +1122,71 @@ public sealed class Plugin : IDalamudPlugin
         {
             var st = Vulcan.CraftingState;
             Status = "Vulcan: " + (st.Length > 0 ? st : "запускается…");
+            WatchCraft(now, st);
             return;
         }
         RestoreArtisan();
+        if (craftHang != null) Print(craftHang);
         ReportCrafts();
+    }
+
+    /// <summary>
+    /// Vulcan's queue does not notice some failures: crafting while mounted, or an ingredient it cannot select that
+    /// it reports as a timeout instead of "missing materials" (Cordia Lumber without Cordia Log looped for 7 hours).
+    /// When the queue position, the craft count and the cart items in the bags stay the same for a few minutes outside
+    /// gathering/retainer/solver states: dismount (twice at most), then stop Vulcan and report the stuck recipe.
+    /// </summary>
+    private unsafe void WatchCraft(DateTime now, string state)
+    {
+        var prog = Vulcan.QueueProgress();
+        var bags = craftBaseline.Keys.Sum(i => (long)BagCount(i));
+        if (prog is { Recipe: not 0 } pr) bags += BagCount(Planner.RecipeItem(pr.Recipe));
+        var sig = (prog?.Index ?? -1, prog?.Recipe ?? 0u, prog?.Done ?? 0, bags);
+        var waiting = state.Contains("Gather") || state.Contains("Retainer") || state.Contains("Raphael") || state.Contains("Repair");
+        if (sig != craftSig || waiting) { craftSig = sig; craftSigAt = now; return; }
+        if (now - craftSigAt < CraftStall) return;
+
+        var recipe = prog?.Recipe ?? 0;
+        var name = recipe != 0 ? Planner.RecipeName(recipe) : "рецепте";
+        if (Condition[ConditionFlag.Mounted] && craftDismounts < 2)
+        {
+            craftDismounts++;
+            craftSigAt = now;
+            Print($"Vulcan {CraftStall.TotalMinutes:0} мин не может начать {name}, а персонаж на маунте — спешиваюсь.");
+            try { ActionManager.Instance()->UseAction(ActionType.GeneralAction, 23); } // Dismount
+            catch (Exception ex) { Log.Warning($"dismount: {ex.Message}"); }
+            return;
+        }
+
+        var lacking = recipe == 0 ? new List<string>() : Planner.Ingredients(recipe)
+            .Where(i => i.ItemId > 19 && BagCount(i.ItemId) < i.Amount)
+            .Select(i => $"{Planner.ItemName(i.ItemId)} {BagCount(i.ItemId)}/{i.Amount}").ToList();
+        craftHang = $"Vulcan завис на {name}: {(now - craftSigAt + CraftStall).TotalMinutes:0} мин без прогресса"
+                    + (lacking.Count > 0 ? $", не хватает: {string.Join(", ", lacking)}" : "")
+                    + ". Остановил крафт; остальное — в отчёте ниже, докрафт продолжит после того, как добудешь недостающее.";
+        Vulcan.StopCrafting();
+        craftSigAt = now;
+    }
+
+    /// <summary>Before crafting: raw materials still missing that Vulcan will not gather itself (vendors that failed,
+    /// scrip items, market, mob drops) — the recipes that need them will be skipped.</summary>
+    private void WarnMissingBeforeCraft()
+    {
+        try
+        {
+            var plan = Planner.Build(EffectiveCart(), BagCount, id => RouteOf(id) == Route.Bicolor);
+            var lacking = plan.Leaves.Where(kv => kv.Value > 0 && RouteOf(kv.Key, kv.Value) != Route.Gather)
+                              .Select(kv => $"{Planner.ItemName(kv.Key)} ×{kv.Value}")
+                              .Concat(plan.Purchases.Where(g => g.Units > 0).Select(g => $"{Planner.ItemName(g.ItemId)} ×{g.Units}"))
+                              .ToList();
+            if (lacking.Count > 0)
+                Print($"Перед крафтом не хватает того, что Vulcan сам не добудет: {string.Join(", ", lacking)}"
+                      + (Config.UseRetainers ? " (если нет у ретейнеров)" : "") + ". Рецепты с ними будут пропущены.");
+        }
+        catch (Exception ex)
+        {
+            Log.Warning($"missing check: {ex.Message}");
+        }
     }
 
     /// <summary>Compares the bags with what the cart asked for and says what was not crafted and why.</summary>

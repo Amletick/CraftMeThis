@@ -865,11 +865,14 @@ public sealed class MainWindow : Window
         }
         var fish = c.ScripAllowFish;
         if (ImGui.Checkbox("Разрешить рыбу для собирательских скриптов", ref fish)) { c.ScripAllowFish = fish; p.SaveConfig(); }
+        if (fish && !ScripFarm.FishingAllowedInGbr())
+            ImGui.TextColored(Ui.Warn, "GatherBuddy не ловит рыбу в авто-сборе, пока в его настройках выключен «Fish data collection» — рыба пропускается.");
 
         var options = p.Scrips.Options(c.ScripTabKind, c.ScripAllowFish);
         var chosenId = c.ScripItem.GetValueOrDefault(c.ScripTabKind);
         var chosen = options.FirstOrDefault(o => o.ItemId == chosenId);
-        string Label(Collectable o) => $"{o.Name}  ·  {(o.RecipeId != 0 ? p.Scrips.JobName(o.CraftJob) : o.Fish ? "FSH" : "MIN/BTN")} {o.Level}  ·  {o.Low}/{o.Mid}/{o.High}";
+        string Label(Collectable o) => $"{o.Name}  ·  {(o.RecipeId != 0 ? p.Scrips.JobName(o.CraftJob) : o.Fish ? "FSH" : "MIN/BTN")} {o.Level}  ·  {o.Low}/{o.Mid}/{o.High}"
+                                       + (p.Scrips.Missing(o).Count > 0 ? $"  ·  нет: {p.Scrips.MissingText(o)}" : "");
         ImGui.SetNextItemWidth(-1);
         if (ImGui.BeginCombo("##collectable", chosen != null ? Label(chosen) : options.Count > 0 ? "авто: " + Label(options[0]) : "нет подходящих коллектаблов"))
         {
@@ -882,7 +885,7 @@ public sealed class MainWindow : Window
             }
             ImGui.EndCombo();
         }
-        ImGui.TextColored(Ui.Muted, "Награда: низкая/средняя/высокая коллективность. Расчёт партии — по средней. Список — то, что твои классы могут сделать сейчас.");
+        ImGui.TextColored(Ui.Muted, "Награда: низкая/средняя/высокая коллективность. Расчёт партии — по средней. Список — то, что твои классы могут сделать сейчас; сначала те, для которых всё добывается (сбор, вендоры за гил). «нет: …» — материалы с мобов и т.п., такие пропускаются. Если коллектабл не дал скриптов, фарм сам переключается на следующий.");
 
         if (running)
         {

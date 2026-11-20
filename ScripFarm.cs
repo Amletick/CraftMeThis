@@ -55,6 +55,14 @@ public sealed class ScripFarm
     private bool? savedAutoTurnIn;
     private int batches, idleBatches;
     private int before;
+    private readonly HashSet<uint> tried = new();
+    private bool allowFish;
+    private uint preferred;
+    // progress watchdog for one batch: scrips + collectables in the bags
+    private (int Scrips, int Items, int Queue, int Done, bool Waiting) lastProgress;
+    private DateTime lastProgressAt;
+    private static readonly TimeSpan BatchStall = TimeSpan.FromMinutes(12);
+    private readonly Dictionary<uint, (DateTime At, List<uint> Missing)> missingCache = new();
 
     public ScripKind Kind { get; private set; }
     public int Target { get; private set; }
@@ -114,10 +122,64 @@ public sealed class ScripFarm
     /// <summary>Gatherer level used for gathered collectables: the best of Miner/Botanist (Fisher for fish).</summary>
     private int GatherLevel(bool fish) => fish ? JobLevel(18) : Math.Max(JobLevel(16), JobLevel(17));
 
-    /// <summary>Collectables of a kind that the character can make now, best payout first.</summary>
-    public List<Collectable> Options(ScripKind kind, bool allowFish) =>
-        all.Where(c => c.Kind == kind && (c.RecipeId != 0 ? JobLevel(c.CraftJob) >= c.Level : (allowFish || !c.Fish) && GatherLevel(c.Fish) >= c.Level))
-           .OrderByDescending(c => c.Mid).ThenByDescending(c => c.Level).ToList();
+    /// <summary>
+    /// Collectables of a kind that the character can make now: those whose materials can all be obtained first
+    /// (bags, gathering, gil vendors), then by payout. Fish only when allowed and GatherBuddy may auto-fish
+    /// (it refuses fish in auto-gather lists while its fishing data collection opt-in is off).
+    /// </summary>
+    public List<Collectable> Options(ScripKind kind, bool allowFish)
+    {
+        var fishOk = allowFish && FishingAllowedInGbr();
+        return all.Where(c => c.Kind == kind && (c.RecipeId != 0 ? JobLevel(c.CraftJob) >= c.Level : (fishOk || !c.Fish) && GatherLevel(c.Fish) >= c.Level))
+                  .OrderBy(c => Missing(c).Count > 0).ThenByDescending(c => c.Mid).ThenByDescending(c => c.Level).ToList();
+    }
+
+    /// <summary>
+    /// Raw materials of one craft of a collectable that nothing in the pipeline will bring: not in the bags, not
+    /// gatherable at the character's level, not sold for gil (mob drops, tribe items...). Vulcan skips such recipes.
+    /// </summary>
+    public List<uint> Missing(Collectable c)
+    {
+        if (c.RecipeId == 0) return new();
+        var now = DateTime.UtcNow;
+        if (missingCache.TryGetValue(c.RecipeId, out var cached) && now - cached.At < TimeSpan.FromSeconds(30)) return cached.Missing;
+        var missing = new List<uint>();
+        try
+        {
+            var plan = p.Planner.Build(new[] { new CartLine(c.RecipeId, 1) }, Plugin.BagCount, _ => false);
+            var gl = GatherLevel(false);
+            foreach (var (id, qty) in plan.Leaves)
+            {
+                if (qty <= 0 || id <= 19) continue;
+                if (gatherLevel.TryGetValue(id, out var lvl) && gl >= lvl) continue;
+                if (p.Vulcan.PriceOf(id) is { Group: "Gil" }) continue;
+                missing.Add(id);
+            }
+        }
+        catch
+        {
+            // planner not ready: treat as obtainable
+        }
+        missingCache[c.RecipeId] = (now, missing);
+        return missing;
+    }
+
+    public string MissingText(Collectable c) => string.Join(", ", Missing(c).Select(p.Planner.ItemName));
+
+    /// <summary>GatherBuddy's AutoGatherConfig.FishDataCollection: without it auto-gather drops fish from its lists.</summary>
+    public static bool FishingAllowedInGbr()
+    {
+        try
+        {
+            var cfg = GbrConfig();
+            var ag = cfg?.GetType().GetProperty("AutoGatherConfig", Any)?.GetValue(cfg);
+            return ag?.GetType().GetProperty("FishDataCollection", Any)?.GetValue(ag) is true;
+        }
+        catch
+        {
+            return false;
+        }
+    }
 
     public string JobName(uint classJobId) =>
         Plugin.Data.GetExcelSheet<ClassJob>().TryGetRow(classJobId, out var j) ? j.Abbreviation.ExtractText() : "?";
@@ -130,10 +192,16 @@ public sealed class ScripFarm
         if (options.Count == 0)
             return Info(kind).Crafter
                 ? "Нет крафтера нужного уровня для коллектаблов этих скриптов."
-                : "Нет собирателя нужного уровня для коллектаблов этих скриптов (рыбу можно разрешить в настройках вкладки).";
+                : "Нет собирателя нужного уровня для коллектаблов этих скриптов"
+                  + (allowFish && !FishingAllowedInGbr() ? " (рыбу GatherBuddy не ловит без «Fish data collection» в настройках авто-сбора)." : " (рыбу можно разрешить в настройках вкладки).");
         Kind = kind;
         Target = target;
-        Item = options.FirstOrDefault(o => o.ItemId == preferredItem) ?? options[0];
+        this.allowFish = allowFish;
+        preferred = preferredItem;
+        tried.Clear();
+        Item = PickNext();
+        if (Item == null)
+            return $"Все коллектаблы этих скриптов требуют того, что плагин не добудет: {string.Join("; ", options.Take(3).Select(o => $"{o.Name} — {MissingText(o)}"))}.";
         batches = idleBatches = 0;
         Finished = false;
         Running = true;
@@ -156,6 +224,27 @@ public sealed class ScripFarm
 
     private void Go(Step s, string now) { step = s; stepAt = DateTime.UtcNow; if (now.Length > 0) Now = now; }
 
+    /// <summary>Next collectable to try: the preferred one if it is obtainable, otherwise the best obtainable not tried yet.</summary>
+    private Collectable? PickNext()
+    {
+        var options = Options(Kind, allowFish).Where(o => !tried.Contains(o.ItemId) && Missing(o).Count == 0).ToList();
+        var pick = options.FirstOrDefault(o => o.ItemId == preferred) ?? options.FirstOrDefault();
+        if (pick != null) tried.Add(pick.ItemId);
+        return pick;
+    }
+
+    /// <summary>The current collectable gave nothing: switch to the next one, or stop when none is left.</summary>
+    private void SwitchOrStop(string why)
+    {
+        var old = Item;
+        var next = PickNext();
+        if (next == null) { Stop($"{why} Других подходящих коллектаблов нет — останавливаю фарм скриптов ({Have(Kind)}/{Target})."); return; }
+        Item = next;
+        idleBatches = 0;
+        Plugin.Chat.Print($"[CraftMeThis] {why} Переключаюсь с {old?.Name} на {next.Name}.");
+        Go(Step.Start, $"Переключаюсь на {next.Name}.");
+    }
+
     public void Tick(DateTime now)
     {
         if (!Running || Item == null) return;
@@ -168,6 +257,8 @@ public sealed class ScripFarm
                 if (have >= Target) { Stop($"{label} скрипы: {have}/{Target} — хватает."); return; }
                 before = have;
                 batches++;
+                lastProgress = default;
+                lastProgressAt = now;
                 var units = (int)Math.Ceiling((Target - have) / (double)Math.Max(1, Item.Mid));
                 if (Item.RecipeId != 0)
                 {
@@ -193,6 +284,19 @@ public sealed class ScripFarm
                 Now = (Item.RecipeId != 0 ? $"Vulcan крафтит {Item.Name}" : $"Авто-сбор: {Item.Name} — {VulcanLink.AutoGatherStatus()}")
                       + $" · скрипы {have}/{Target}";
                 if (have >= Target && Item.RecipeId == 0) SetAutoGather(false);
+                // Watchdog: neither scrips nor collectables in the bags moved for a long time: auto-gather refused the
+                // item, or Vulcan is stuck on a craft. End the batch; Check then switches to another collectable.
+                var q = Item.RecipeId != 0 ? p.Vulcan.QueueProgress() : null;
+                var vs = Item.RecipeId != 0 ? p.Vulcan.CraftingState : "";
+                var waiting = vs.Contains("Gather") || vs.Contains("Retainer") || vs.Contains("Raphael") || vs.Contains("Repair");
+                var progress = (have, Plugin.BagCount(Item.ItemId), q?.Index ?? 0, q?.Done ?? 0, waiting);
+                if (progress != lastProgress || waiting || TurnInRunning()) { lastProgress = progress; lastProgressAt = now; }
+                else if (busy && have < Target && now - lastProgressAt > BatchStall)
+                {
+                    Plugin.Chat.Print($"[CraftMeThis] {Item.Name}: {BatchStall.TotalMinutes:0} мин без прибавки — прерываю партию.");
+                    if (Item.RecipeId != 0) p.Vulcan.StopCrafting(); else SetAutoGather(false);
+                    busy = false;
+                }
                 if (busy && have < Target) return;
                 if (TurnInRunning()) return; // GatherBuddy is already handing in
                 Go(Step.TurnIn, "Сдаю оставшиеся коллектаблы…");
@@ -209,6 +313,12 @@ public sealed class ScripFarm
                 if (now - stepAt < TimeSpan.FromSeconds(3)) return;
                 if (have >= Target) { Stop($"{label} скрипы: {have}/{Target} — готово."); return; }
                 idleBatches = have > before ? 0 : idleBatches + 1;
+                if (idleBatches >= 1 && Plugin.BagCount(Item.ItemId) == 0)
+                {
+                    // Nothing was made at all: this collectable does not work (materials, fishing, node), try another.
+                    SwitchOrStop($"{Item.Name} не получился — скриптов не прибавилось.");
+                    return;
+                }
                 if (idleBatches >= 2) { Stop($"Две партии без прибавки скриптов ({have}/{Target}). Проверь сдачу коллектаблов в GatherBuddy (Collectables)."); return; }
                 if (batches >= 10) { Stop($"10 партий, скрипы {have}/{Target} — останавливаюсь."); return; }
                 Go(Step.Start, $"Скрипы {have}/{Target} — ещё партия.");
