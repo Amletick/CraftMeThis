@@ -14,7 +14,12 @@ public enum ScripKind { OrangeCrafter, PurpleCrafter, OrangeGatherer, PurpleGath
 
 /// <summary>A collectable that pays scrips: crafted (recipe) or gathered/fished.</summary>
 public sealed record Collectable(uint ItemId, string Name, ScripKind Kind, int Level, int Low, int Mid, int High,
-                                 uint RecipeId, uint CraftJob, bool Fish);
+                                 uint RecipeId, uint CraftJob, bool Fish, int LowCol = 0, int MidCol = 0, int HighCol = 0)
+{
+    /// <summary>Scrips the exchange pays for one piece with this collectability.</summary>
+    public int RewardFor(int collectability) =>
+        HighCol > 0 && collectability >= HighCol ? High : MidCol > 0 && collectability >= MidCol ? Mid : collectability >= LowCol ? Low : 0;
+}
 
 /// <summary>
 /// Scrip farming on top of GatherBuddy Reborn's collectables automation:
@@ -104,6 +109,7 @@ public sealed class ScripFarm
         {
             if (c.Item.RowId == 0 || !c.CollectablesShopRewardScrip.IsValid) continue;
             var rw = c.CollectablesShopRewardScrip.Value;
+            var rf = c.CollectablesShopRefine.IsValid ? c.CollectablesShopRefine.Value : default;
             var kind = Kinds.FirstOrDefault(k => k.Currency == rw.Currency);
             if (kind.ItemId == 0 || all.Any(a => a.ItemId == c.Item.RowId && a.Kind == kind.Kind)) continue;
             var id = c.Item.RowId;
@@ -115,14 +121,14 @@ public sealed class ScripFarm
                 // turns on Collectable Synthesis, so e.g. Bluespirit Glaives come out as plain items nobody takes.
                 if (!items.TryGetRow(id, out var ac) || !ac.AlwaysCollectable) continue;
                 all.Add(new Collectable(id, name, kind.Kind, r.RecipeLevelTable.Value.ClassJobLevel, rw.LowReward, rw.MidReward, rw.HighReward,
-                                        r.RowId, 8 + r.CraftType.RowId, false));
+                                        r.RowId, 8 + r.CraftType.RowId, false, rf.LowCollectability, rf.MidCollectability, rf.HighCollectability));
             }
             else
             {
                 var isFish = fish.Contains(id);
                 if (!isFish && !gatherLevel.ContainsKey(id)) continue;
                 all.Add(new Collectable(id, name, kind.Kind, isFish ? c.LevelMax : gatherLevel[id], rw.LowReward, rw.MidReward, rw.HighReward,
-                                        0, 0, isFish));
+                                        0, 0, isFish, rf.LowCollectability, rf.MidCollectability, rf.HighCollectability));
             }
         }
     }
@@ -193,6 +199,27 @@ public sealed class ScripFarm
     }
 
     private int SetBags() => Set.Sum(c => Space.CountInBags(c.ItemId));
+
+    /// <summary>Scrips the collectables of the set already in the bags will give at turn-in (by their collectability).</summary>
+    private unsafe int BagValue()
+    {
+        var im = InventoryManager.Instance();
+        if (im == null) return 0;
+        var byId = Set.ToDictionary(c => c.ItemId);
+        var sum = 0;
+        foreach (var t in Space.Bags)
+        {
+            var cont = im->GetInventoryContainer(t);
+            if (cont == null) continue;
+            for (var i = 0; i < cont->Size; i++)
+            {
+                var slot = cont->GetInventorySlot(i);
+                if (slot != null && byId.TryGetValue(slot->ItemId, out var c))
+                    sum += c.RewardFor(slot->SpiritbondOrCollectability) * Math.Max(1, (int)slot->Quantity);
+            }
+        }
+        return sum;
+    }
 
     public static int Have(ScripKind kind) => Plugin.CurrencyCount(Info(kind).ItemId);
 
@@ -386,11 +413,12 @@ public sealed class ScripFarm
                     // Turn-in happens only after the batch: keep its total payout under the cap.
                     var mid = Set.Min(c => Math.Max(1, c.Mid));
                     units = Math.Min((int)Math.Ceiling((Target - have) / (double)mid), Math.Max(1, (Plugin.ScripCap - have) / Math.Max(1, reward)));
-                    var each = (int)Math.Ceiling(Math.Max(1, units) / (double)Set.Count);
-                    var err = p.Vulcan.StartGather(Set.ToDictionary(c => c.ItemId, c => each + Space.CountInBags(c.ItemId)));
+                    // No per-item quota: each item may cover the whole need, GatherBuddy goes round whichever node is up,
+                    // and Working ends the batch once the pieces in the bags are worth the missing scrips.
+                    var err = p.Vulcan.StartGather(Set.ToDictionary(c => c.ItemId, c => Math.Max(1, units) + Space.CountInBags(c.ItemId)));
                     if (err != null) { Stop(err); return; }
                     Go(Step.Working, Set.Count > 1
-                        ? $"Собираю коллектаблы с {Set.Count} таймовых нодок по очереди окон ({SetName}), по {each} шт. ради скриптов: {have}/{Target}."
+                        ? $"Собираю коллектаблы по кругу с {Set.Count} таймовых нодок ({SetName}), пока не наберётся на {Target - have} скриптов: {have}/{Target}."
                         : $"Собираю коллектабл {Item.Name} ×{units} ради скриптов: {have}/{Target}.");
                 }
                 return;
@@ -402,7 +430,19 @@ public sealed class ScripFarm
                 var busy = Item.RecipeId != 0 ? p.Vulcan.CraftingRunning : AutoGatherOn();
                 Now = (Item.RecipeId != 0 ? $"Vulcan крафтит {Item.Name}" : $"Авто-сбор: {SetName} — {VulcanLink.AutoGatherStatus()}")
                       + $" · скрипы {have}/{Target}";
-                if (have >= Target && Item.RecipeId == 0) SetAutoGather(false);
+                if (Item.RecipeId == 0 && busy)
+                {
+                    // Enough in the bags for the target (or for the cap): end the round and hand in.
+                    var value = BagValue();
+                    var top = Set.Max(c => Math.Max(c.High, c.Mid));
+                    Now += $" · в сумках на {value}";
+                    if (have + value >= Target || have + value + top > Plugin.ScripCap)
+                    {
+                        Plugin.Log.Information($"[ScripFarm] bags worth {value}, have {have}, target {Target}: ending gather round");
+                        SetAutoGather(false);
+                        busy = false;
+                    }
+                }
                 // Watchdog: neither scrips nor collectables in the bags moved for a long time: auto-gather refused the
                 // item, or Vulcan is stuck on a craft. End the batch; Check then switches to another collectable.
                 var q = Item.RecipeId != 0 ? p.Vulcan.QueueProgress() : null;

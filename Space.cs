@@ -13,7 +13,7 @@ namespace CraftMeThis;
 /// </summary>
 public static class Space
 {
-    private static readonly InventoryType[] Bags = { InventoryType.Inventory1, InventoryType.Inventory2, InventoryType.Inventory3, InventoryType.Inventory4 };
+    internal static readonly InventoryType[] Bags = { InventoryType.Inventory1, InventoryType.Inventory2, InventoryType.Inventory3, InventoryType.Inventory4 };
 
     public static unsafe int FreeSlots()
     {

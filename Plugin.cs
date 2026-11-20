@@ -674,6 +674,34 @@ public sealed class Plugin : IDalamudPlugin
     private DateTime learnUntil = DateTime.MinValue;
 
     /// <summary>Uses unlearned book items that are in the bags; true while waiting for the game to register them.</summary>
+    // Master books used as soon as they are in the bags (bought with scrips during the run), whatever the phase.
+    private DateTime nextBookCheck;
+    private readonly Dictionary<uint, (int Tries, DateTime At)> bookTries = new();
+
+    private unsafe void LearnBoughtBooks(DateTime now)
+    {
+        if (now < nextBookCheck) return;
+        nextBookCheck = now.AddSeconds(5);
+        try
+        {
+            if (!IsIdle()) return;
+            foreach (var b in BookNeeds(FullEffectiveCart()))
+            {
+                if (BagCount(b.ItemId) == 0) continue;
+                bookTries.TryGetValue(b.ItemId, out var t);
+                if (t.Tries >= 3 || now - t.At < TimeSpan.FromSeconds(20)) continue;
+                bookTries[b.ItemId] = (t.Tries + 1, now);
+                Print(t.Tries == 0 ? $"Купил {b.Name} — сразу изучаю." : $"{b.Name} всё ещё не изучена — пробую ещё раз.");
+                FFXIVClientStructs.FFXIV.Client.UI.Agent.AgentInventoryContext.Instance()->UseItem(b.ItemId);
+                return; // one at a time: the use animation blocks the next one
+            }
+        }
+        catch (Exception ex)
+        {
+            Log.Warning($"learn bought books: {ex.Message}");
+        }
+    }
+
     private unsafe bool LearnBooks(DateTime now)
     {
         var pending = BookNeeds(EffectiveCart()).Where(b => BagCount(b.ItemId) > 0).ToList();
@@ -956,6 +984,7 @@ public sealed class Plugin : IDalamudPlugin
         nextTick = now.AddSeconds(1);
         if (!ClientState.IsLoggedIn) return;
         if (Leveler.Running) { Leveler.Tick(now); return; }
+        LearnBoughtBooks(now);
 
         switch (Phase)
         {
