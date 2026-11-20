@@ -249,6 +249,7 @@ public sealed class Plugin : IDalamudPlugin
         Sources = new Sources(Data.GetExcelSheet<GatheringItem>(), Data.GetExcelSheet<FishParameter>(), Data.GetExcelSheet<SpearfishingItem>(),
             Data.GetSubrowExcelSheet<GilShopItem>());
         Jobs.Normalize(Config.Jobs);
+        Planner.CanCraft = id => RecipeBlockReason(id) == null;
 
         // Runs left "running" by a plugin reload or game exit.
         foreach (var r in Config.History.Where(r => r.Result == "running"))
@@ -595,9 +596,41 @@ public sealed class Plugin : IDalamudPlugin
     }
 
     /// <summary>What CraftMeThis (with Vulcan and Auto FATE Grind) will not do on its own for the cart.</summary>
+    /// <summary>
+    /// Why the character cannot craft a recipe: a master recipe book that is not learned, or the crafter level.
+    /// Vulcan cannot open such a recipe and retries it forever, so these precrafts are planned as purchases instead.
+    /// </summary>
+    internal static unsafe string? RecipeBlockReason(uint recipeId)
+    {
+        if (!ClientState.IsLoggedIn || !Data.GetExcelSheet<Recipe>().TryGetRow(recipeId, out var r)) return null;
+        var ps = FFXIVClientStructs.FFXIV.Client.Game.UI.PlayerState.Instance();
+        if (ps == null) return null;
+        var book = r.SecretRecipeBook.RowId;
+        if (book != 0 && !ps->IsSecretRecipeBookUnlocked(book))
+            return $"нужна книга {(r.SecretRecipeBook.IsValid ? r.SecretRecipeBook.Value.Name.ExtractText() : $"#{book}")}";
+        var job = 8 + r.CraftType.RowId;
+        if (Data.GetExcelSheet<ClassJob>().TryGetRow(job, out var cj) && cj.ExpArrayIndex >= 0 && cj.ExpArrayIndex < ps->ClassJobLevels.Length)
+        {
+            var have = ps->ClassJobLevels[cj.ExpArrayIndex];
+            var need = r.RecipeLevelTable.Value.ClassJobLevel;
+            if (have < need) return $"{cj.Abbreviation.ExtractText()} {have} уровня, а нужен {need}";
+        }
+        return null;
+    }
+
+    /// <summary>Recipes in the cart's tree the character cannot craft, with the reason (still missing ones only).</summary>
+    internal List<(uint RecipeId, string Why)> BlockedRecipes(IReadOnlyList<CartLine> lines)
+    {
+        Planner.Build(lines, BagCount, id => RouteOf(id) == Route.Bicolor);
+        return Planner.LastBlocked.Select(id => (id, RecipeBlockReason(id) ?? "недоступен")).ToList();
+    }
+
     internal List<string> ManualTasks()
     {
         var list = new List<string>(Config.ImportManual);
+        var blockedRecipes = BlockedRecipes(FullEffectiveCart());
+        if (blockedRecipes.Count > 0)
+            list.Add($"Рецепты, которые персонаж не может крафтить (Vulcan на них зависает): {string.Join("; ", blockedRecipes.Select(b => $"{Planner.RecipeName(b.RecipeId)} — {b.Why}"))}. Выучи книгу / подними класс, или купи готовые на рынке — они в списке рынка.");
         var bought = VendorBuys.Select(v => v.ItemId).ToHashSet();
 
         var market = Materials.Where(m => m.Route == Route.Market && !bought.Contains(m.ItemId))
@@ -1090,9 +1123,28 @@ public sealed class Plugin : IDalamudPlugin
                     SetStatus(Phase.Failed, "Artisan так и не выгрузился, а Vulcan не крафтит при загруженном Artisan.");
                 return;
             }
+            var batchLines = currentBatch ?? CartLines();
+            var craftable = new List<CartLine>();
+            var skipped = new List<string>();
+            foreach (var l in batchLines)
+            {
+                var blocked = BlockedRecipes(new[] { l });
+                if (blocked.Count == 0) craftable.Add(l);
+                else skipped.Add($"{Planner.RecipeName(l.RecipeId)} ({string.Join(", ", blocked.Select(b => $"{Planner.RecipeName(b.RecipeId)}: {b.Why}"))})");
+            }
+            if (skipped.Count > 0)
+                Print($"Не отдаю в Vulcan то, что упирается в недоступный рецепт: {string.Join("; ", skipped)}. Купи эти полуфабрикаты на рынке или выучи книгу — потом докрафт.");
+            if (craftable.Count == 0)
+            {
+                RestoreArtisan();
+                Config.ResumeFinals = true;
+                SaveConfig();
+                SetStatus(Phase.Failed, "Все рецепты партии упираются в недоступные рецепты — крафтить нечего.");
+                return;
+            }
             var err = currentBatch != null
-                ? Vulcan.StartCraftingNamed("CraftMeThis Batch", currentBatch, Config.UseRetainers)
-                : Vulcan.StartCrafting(CartLines(), Config.UseRetainers, Config.ResumeFinals);
+                ? Vulcan.StartCraftingNamed("CraftMeThis Batch", craftable, Config.UseRetainers)
+                : Vulcan.StartCrafting(craftable, Config.UseRetainers, Config.ResumeFinals);
             if (err != null)
             {
                 RestoreArtisan();
