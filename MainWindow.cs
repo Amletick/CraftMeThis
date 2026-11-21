@@ -1044,6 +1044,83 @@ public sealed class MainWindow : Window
     private (int Free, int Need) space;
     private DateTime spaceAt = DateTime.MinValue;
 
+    private List<Food.Option>? craftFoods, craftMeds, gatherFoods;
+    private DateTime foodsAt = DateTime.MinValue;
+    private string? foodError;
+
+    private void DrawFoodCard()
+    {
+        if (!Ui.BeginCard("set-food")) return;
+        var c = p.Config;
+        Ui.Caption("Еда и медицина");
+        if (craftFoods == null || DateTime.UtcNow - foodsAt > TimeSpan.FromSeconds(3))
+        {
+            craftFoods = Food.InBags(Food.WellFed, Food.CraftParams);
+            craftMeds = Food.InBags(Food.Medicated, Food.CraftParams);
+            gatherFoods = Food.InBags(Food.WellFed, Food.GatherParams);
+            foodsAt = DateTime.UtcNow;
+        }
+
+        if (FoodCombo("Еда на крафт", c.CraftFoodId, c.CraftFoodHq, craftFoods, out var id, out var hq))
+        { c.CraftFoodId = id; c.CraftFoodHq = hq; p.SaveConfig(); }
+        if (FoodCombo("Медицина на крафт", c.CraftMedicineId, c.CraftMedicineHq, craftMeds!, out id, out hq))
+        { c.CraftMedicineId = id; c.CraftMedicineHq = hq; p.SaveConfig(); }
+        ImGui.TextColored(Ui.Muted, "Ставится в список Vulcan: он сам ест перед крафтом, когда бафф кончился. Бонус еды учитывается в проверке Craftsmanship/Control рецептов.");
+
+        var gf = p.Vulcan.GatherFood();
+        if (gf == null)
+            ImGui.TextColored(Ui.Warn, "Еду на сбор не прочитать — GatherBuddy Reborn не загружен?");
+        else
+        {
+            var (gid, gon) = gf.Value;
+            uint cur = gon ? gid % 1000000 : 0;
+            if (FoodCombo("Еда на сбор", cur, gon && gid > 1000000, gatherFoods!, out id, out hq))
+                foodError = p.Vulcan.SetGatherFood(id, hq);
+            ImGui.TextColored(Ui.Muted, "Это еда пресета «Default» автосбора GatherBuddy — меняется прямо там. Ест сам GatherBuddy.");
+        }
+        if (foodError != null) ImGui.TextColored(Ui.Bad, foodError);
+
+        foreach (var (job, st) in c.CrafterStats.OrderBy(kv => kv.Key))
+        {
+            if (st.Length < 2) continue;
+            var abbr = Plugin.Data.GetExcelSheet<Lumina.Excel.Sheets.ClassJob>().TryGetRow(job, out var cj) ? cj.Abbreviation.ExtractText() : job.ToString();
+            var line = $"{abbr}: Craftsmanship {st[0]}, Control {st[1]}{(st.Length >= 3 && st[2] == 1 ? " (с едой)" : "")}";
+            if (c.CraftFoodId != 0 && !(st.Length >= 3 && st[2] == 1))
+                line += $" → с едой ~{st[0] + Food.Bonus(c.CraftFoodId, c.CraftFoodHq, Food.Craftsmanship, st[0])} / ~{st[1] + Food.Bonus(c.CraftFoodId, c.CraftFoodHq, Food.Control, st[1])}";
+            ImGui.TextColored(Ui.Muted, line);
+        }
+        if (c.CrafterStats.Count == 0) ImGui.TextColored(Ui.Muted, "Статы крафтеров запоминаются, когда надет класс крафтера.");
+        Ui.EndCard();
+    }
+
+    /// <summary>Combo of food in the bags plus "не есть"; the chosen one stays listed even when it ran out.</summary>
+    private static bool FoodCombo(string label, uint curId, bool curHq, List<Food.Option> options, out uint id, out bool hq)
+    {
+        id = curId; hq = curHq;
+        var changed = false;
+        var have = curId == 0 ? 0 : Food.CountInBags(curId, curHq);
+        var preview = curId == 0 ? "не есть" : $"{Food.Label(curId, curHq)} — {have} шт.";
+        ImGui.SetNextItemWidth(320);
+        if (ImGui.BeginCombo(label, preview))
+        {
+            if (ImGui.Selectable("не есть", curId == 0)) { id = 0; hq = false; changed = true; }
+            foreach (var o in options)
+            {
+                if (ImGui.Selectable($"{Food.Label(o.ItemId, o.Hq)} — {o.Count} шт.##{o.ItemId}{o.Hq}", o.ItemId == curId && o.Hq == curHq))
+                { id = o.ItemId; hq = o.Hq; changed = true; }
+                if (ImGui.IsItemHovered() && o.Stats.Length > 0) ImGui.SetTooltip(o.Stats);
+            }
+            if (options.Count == 0) ImGui.TextColored(Ui.Muted, "в сумках нет подходящего");
+            ImGui.EndCombo();
+        }
+        if (curId != 0 && have == 0)
+        {
+            ImGui.SameLine();
+            ImGui.TextColored(Ui.Warn, "нет в сумках");
+        }
+        return changed;
+    }
+
     private void DrawSettings()
     {
         var c = p.Config;
@@ -1079,6 +1156,7 @@ public sealed class MainWindow : Window
             ImGui.TextColored(Ui.Muted, "Vulcan не крафтит, пока загружен Artisan.");
             Ui.EndCard();
         }
+        DrawFoodCard();
         if (Ui.BeginCard("set-mob"))
         {
             Ui.Caption("Фарм мобов (Hunter)");

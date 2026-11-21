@@ -20,6 +20,13 @@ namespace CraftMeThis;
 public sealed class Configuration : IPluginConfiguration
 {
     public int Version { get; set; } = 2;
+    /// <summary>Last seen Craftsmanship/Control per crafter job (ClassJob id → [cms, control]), read while that job is on.</summary>
+    public Dictionary<uint, int[]> CrafterStats { get; set; } = new();
+    /// <summary>Food/medicine Vulcan uses before crafts (0 = none).</summary>
+    public uint CraftFoodId { get; set; }
+    public bool CraftFoodHq { get; set; }
+    public uint CraftMedicineId { get; set; }
+    public bool CraftMedicineHq { get; set; }
     /// <summary>Extra gemstones to farm on top of what the cart costs.</summary>
     public int Reserve { get; set; }
     /// <summary>Seconds the character must stay idle after "/afg stop soft" before the vendor run starts.</summary>
@@ -619,8 +626,59 @@ public sealed class Plugin : IDalamudPlugin
             var have = ps->ClassJobLevels[cj.ExpArrayIndex];
             var need = r.RecipeLevelTable.Value.ClassJobLevel;
             if (have < need) return $"{cj.Abbreviation.ExtractText()} {have} уровня, а нужен {need}";
+            // The game refuses the craft ("Insufficient craftsmanship rating") and Vulcan retries it forever.
+            if (Instance?.Config is { } cfg && cfg.CrafterStats.TryGetValue(job, out var st) && st.Length >= 2)
+            {
+                var abbr = cj.Abbreviation.ExtractText();
+                int cms = st[0], ctl = st[1];
+                // Measured without food, and Vulcan will eat the chosen one before crafting: count its bonus.
+                var fed = st.Length >= 3 && st[2] == 1;
+                var withFood = !fed && cfg.CraftFoodId != 0 && Food.CountInBags(cfg.CraftFoodId, cfg.CraftFoodHq) > 0;
+                if (withFood)
+                {
+                    cms += Food.Bonus(cfg.CraftFoodId, cfg.CraftFoodHq, Food.Craftsmanship, st[0]);
+                    ctl += Food.Bonus(cfg.CraftFoodId, cfg.CraftFoodHq, Food.Control, st[1]);
+                }
+                if (cfg.CraftMedicineId != 0 && Food.CountInBags(cfg.CraftMedicineId, cfg.CraftMedicineHq) > 0 && !Food.HasStatus(Food.Medicated))
+                {
+                    cms += Food.Bonus(cfg.CraftMedicineId, cfg.CraftMedicineHq, Food.Craftsmanship, st[0]);
+                    ctl += Food.Bonus(cfg.CraftMedicineId, cfg.CraftMedicineHq, Food.Control, st[1]);
+                }
+                var note = withFood ? " с едой" : fed ? " (уже с едой)" : "";
+                if (cms < r.RequiredCraftsmanship)
+                    return $"{abbr}: Craftsmanship {cms}{note}, а нужно {r.RequiredCraftsmanship} (не хватает {r.RequiredCraftsmanship - cms}) — гир или еда";
+                if (ctl < r.RequiredControl)
+                    return $"{abbr}: Control {ctl}{note}, а нужно {r.RequiredControl} (не хватает {r.RequiredControl - ctl}) — гир или еда";
+            }
         }
         return null;
+    }
+
+    private DateTime nextStatsAt;
+
+    /// <summary>Remembers Craftsmanship/Control of the crafter job that is on (BaseParam 70/71), for <see cref="RecipeBlockReason"/>.</summary>
+    private unsafe void RecordCrafterStats()
+    {
+        var now = DateTime.UtcNow;
+        if (now < nextStatsAt || !ClientState.IsLoggedIn) return;
+        nextStatsAt = now.AddSeconds(10);
+        try
+        {
+            var ps = FFXIVClientStructs.FFXIV.Client.Game.UI.PlayerState.Instance();
+            if (ps == null) return;
+            var job = (uint)ps->CurrentClassJobId;
+            if (job < 8 || job > 15) return;
+            int cms = ps->Attributes[70], ctl = ps->Attributes[71];
+            if (cms <= 0) return;
+            var fed = Food.HasStatus(Food.WellFed) ? 1 : 0;
+            if (Config.CrafterStats.TryGetValue(job, out var old) && old.Length >= 3 && old[0] == cms && old[1] == ctl && old[2] == fed) return;
+            Config.CrafterStats[job] = new[] { cms, ctl, fed };
+            SaveConfig();
+        }
+        catch (Exception ex)
+        {
+            Log.Warning($"crafter stats: {ex.Message}");
+        }
     }
 
     /// <summary>The master recipe book a recipe needs, when the character has not learned it yet.</summary>
@@ -986,6 +1044,7 @@ public sealed class Plugin : IDalamudPlugin
             // The Vulcan window builds the list editor a frame after "/vulcan <list>".
             if (Vulcan.ShowMaterialsWindow() || DateTime.UtcNow > materialsUntil) materialsUntil = DateTime.MinValue;
         }
+        RecordCrafterStats();
         if (!Running && !Leveler.Running) return;
         var now = DateTime.UtcNow;
         if (now < nextTick) return;
@@ -1305,7 +1364,7 @@ public sealed class Plugin : IDalamudPlugin
         var bags = craftBaseline.Keys.Sum(i => (long)BagCount(i));
         if (prog is { Recipe: not 0 } pr) bags += BagCount(Planner.RecipeItem(pr.Recipe));
         var sig = (prog?.Index ?? -1, prog?.Recipe ?? 0u, prog?.Done ?? 0, bags);
-        var waiting = state.Contains("Gather") || state.Contains("Retainer") || state.Contains("Raphael") || state.Contains("Repair");
+        var waiting = state.Contains("Gather") || state.Contains("Retainer");
         if (sig != craftSig || waiting) { craftSig = sig; craftSigAt = now; return; }
         if (now - craftSigAt < CraftStall) return;
 
@@ -1326,6 +1385,7 @@ public sealed class Plugin : IDalamudPlugin
             .Select(i => $"{Planner.ItemName(i.ItemId)} {BagCount(i.ItemId)}/{i.Amount}").ToList();
         craftHang = $"Vulcan завис на {name}: {(now - craftSigAt + CraftStall).TotalMinutes:0} мин без прогресса"
                     + (lacking.Count > 0 ? $", не хватает: {string.Join(", ", lacking)}" : "")
+                    + (recipe != 0 && RecipeBlockReason(recipe) is { } why ? $" ({why})" : "")
                     + ". Остановил крафт; остальное — в отчёте ниже, докрафт продолжит после того, как добудешь недостающее.";
         Vulcan.StopCrafting();
         craftSigAt = now;

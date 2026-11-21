@@ -281,6 +281,7 @@ public sealed class VulcanLink
             lt.GetProperty("SkipIfEnough", Any)?.SetValue(list, true);
             // "Include Final Crafts": after a failed run, final crafts are reduced by what is already in the bags.
             lt.GetProperty("SkipFinalIfEnough", Any)?.SetValue(list, skipFinalIfEnough);
+            ApplyConsumables(list);
             lt.GetMethod("BuildExpandedList", Any, Type.EmptyTypes)?.Invoke(list, null);
             mt.GetMethod("SaveList", Any)?.Invoke(mgr, new[] { list });
             return list;
@@ -309,6 +310,7 @@ public sealed class VulcanLink
             foreach (var l in lines) if (l.Crafts > 0) add.Invoke(list, new object[] { l.RecipeId, l.Crafts });
             lt.GetProperty("RetainerRestock", Any)?.SetValue(list, retainerRestock);
             lt.GetProperty("SkipIfEnough", Any)?.SetValue(list, true);
+            ApplyConsumables(list);
             mt.GetMethod("SaveList", Any)?.Invoke(mgr, new[] { list });
             var plan = T("GatherBuddy.Crafting.CraftingExecutionPlan").GetMethod("Create", Any, new[] { lt })!.Invoke(null, new[] { list });
             var startQ = T("GatherBuddy.Crafting.CraftingGatherBridge").GetMethod("StartQueueCraftAndGather", Any)!;
@@ -321,6 +323,61 @@ public sealed class VulcanLink
         {
             return $"Не удалось запустить крафт в Vulcan: {Inner(ex)}";
         }
+    }
+
+    /// <summary>Food and medicine chosen in CraftMeThis go into the list's consumables; Vulcan eats them before crafts.</summary>
+    private static void ApplyConsumables(object list)
+    {
+        var cfg = Plugin.Instance?.Config;
+        if (cfg == null) return;
+        var prop = list.GetType().GetProperty("Consumables", Any);
+        if (prop == null) return;
+        var cons = prop.GetValue(list);
+        if (cons == null) { cons = Activator.CreateInstance(prop.PropertyType)!; prop.SetValue(list, cons); }
+        var ct = cons.GetType();
+        ct.GetProperty("FoodItemId", Any)?.SetValue(cons, cfg.CraftFoodId == 0 ? null : (uint?)cfg.CraftFoodId);
+        ct.GetProperty("FoodHQ", Any)?.SetValue(cons, cfg.CraftFoodHq);
+        ct.GetProperty("MedicineItemId", Any)?.SetValue(cons, cfg.CraftMedicineId == 0 ? null : (uint?)cfg.CraftMedicineId);
+        ct.GetProperty("MedicineHQ", Any)?.SetValue(cons, cfg.CraftMedicineHq);
+    }
+
+    /// <summary>Food of GatherBuddy's auto-gather "Default" preset (the last one): item id (HQ = +1000000) and whether it is on.</summary>
+    public (uint ItemId, bool Enabled)? GatherFood()
+    {
+        try { return GatherFoodConfig(out _) is { } f ? ((uint)(f.GetType().GetProperty("ItemId", Any)!.GetValue(f) ?? 0u), f.GetType().GetProperty("Enabled", Any)?.GetValue(f) is true) : null; }
+        catch { return null; }
+    }
+
+    /// <summary>Sets the food of GatherBuddy's "Default" auto-gather preset (0 = off) and saves its actions.json.</summary>
+    public string? SetGatherFood(uint itemId, bool hq)
+    {
+        try
+        {
+            var f = GatherFoodConfig(out var selector) ?? throw new InvalidOperationException("не нашёл пресет Default");
+            var ft = f.GetType();
+            if (itemId != 0) ft.GetProperty("ItemId", Any)!.SetValue(f, hq ? itemId + 1000000 : itemId);
+            ft.GetProperty("Enabled", Any)!.SetValue(f, itemId != 0);
+            selector!.GetType().GetMethod("Save", Any, Type.EmptyTypes)!.Invoke(selector, null);
+            return null;
+        }
+        catch (Exception ex)
+        {
+            return $"Не удалось поставить еду в пресет GatherBuddy: {Inner(ex)}";
+        }
+    }
+
+    private object? GatherFoodConfig(out object? selector)
+    {
+        selector = null;
+        if (!Ready(out _)) return null;
+        var plugin = PluginFinder.FindPluginInstance("GatherBuddyReborn");
+        var ui = plugin?.GetType().GetField("Interface", Any)?.GetValue(plugin);
+        selector = ui?.GetType().GetField("_configPresetsSelector", Any)?.GetValue(ui);
+        if (selector?.GetType().GetProperty("Presets", Any)?.GetValue(selector) is not IEnumerable presets) return null;
+        object? def = null;
+        foreach (var pr in presets) def = pr; // "Default" is always the last one
+        var cons = def?.GetType().GetProperty("Consumables", Any)?.GetValue(def);
+        return cons?.GetType().GetProperty("Food", Any)?.GetValue(cons);
     }
 
     /// <summary>GatherBuddy's temporary gather list for these items (target bag counts), with auto-gather on.</summary>

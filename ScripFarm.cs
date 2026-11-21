@@ -447,7 +447,7 @@ public sealed class ScripFarm
                 // item, or Vulcan is stuck on a craft. End the batch; Check then switches to another collectable.
                 var q = Item.RecipeId != 0 ? p.Vulcan.QueueProgress() : null;
                 var vs = Item.RecipeId != 0 ? p.Vulcan.CraftingState : "";
-                var waiting = vs.Contains("Gather") || vs.Contains("Retainer") || vs.Contains("Raphael") || vs.Contains("Repair");
+                var waiting = vs.Contains("Gather") || vs.Contains("Retainer");
                 var progress = (have, SetBags(), q?.Index ?? 0, q?.Done ?? 0, waiting);
                 if (progress != lastProgress || waiting || TurnInRunning()) { lastProgress = progress; lastProgressAt = now; }
                 else if (busy && have < Target && now - lastProgressAt > (Set.Count > 1 ? GatherSetStall : BatchStall))
