@@ -436,7 +436,11 @@ public sealed class ScripFarm
                     var value = BagValue();
                     var top = Set.Max(c => Math.Max(c.High, c.Mid));
                     Now += $" · в сумках на {value}";
-                    if (have + value >= Target || have + value + top > Plugin.ScripCap)
+                    // Not in the middle of a node: auto-gather switched off there leaves the gathering window open and
+                    // the turn-in stuck. GatherBuddy finishes the node first (a few more pieces), then the round ends.
+                    if ((have + value >= Target || have + value + top > Plugin.ScripCap) && Gathering())
+                        Now += " · хватает, дособираю нодку";
+                    else if (have + value >= Target || have + value + top > Plugin.ScripCap)
                     {
                         Plugin.Log.Information($"[ScripFarm] bags worth {value}, have {have}, target {Target}: ending gather round");
                         SetAutoGather(false);
@@ -469,6 +473,19 @@ public sealed class ScripFarm
             {
                 // GatherBuddy may already be handing in (its own auto turn-in, if the user has it on): wait.
                 if (TurnInRunning()) { turnInPressed = true; stepAt = now; Now = "GatherBuddy сдаёт коллектаблы и покупает по своему списку…"; return; }
+                if (!turnInPressed && Gathering())
+                {
+                    // Left at an open node (auto-gather was switched off mid-node): let GatherBuddy finish it.
+                    if (Item.RecipeId == 0 && now - stepAt > TimeSpan.FromSeconds(5) && !AutoGatherOn())
+                    {
+                        Plugin.Log.Information("[ScripFarm] still at a node before turn-in: auto-gather back on to finish it");
+                        SetAutoGather(true);
+                        Go(Step.Working, "Персонаж остался у нодки — GatherBuddy дособирает её, потом сдача.");
+                    }
+                    else if (now - stepAt > TimeSpan.FromMinutes(3))
+                        Stop("Персонаж 3 мин стоит у нодки (открыто окно сбора) — закрой его и запусти фарм скриптов снова.");
+                    return;
+                }
                 if (!turnInPressed)
                 {
                     // Vulcan says "Queue complete" while the character may still kneel at the crafting log; a turn-in
@@ -587,6 +604,11 @@ public sealed class ScripFarm
 
     private static bool TurnInRunning() => CollectableManager() is { } m && m.GetType().GetProperty("IsRunning", Any)?.GetValue(m) is true;
 
+
+    /// <summary>The gathering window of a node is open.</summary>
+    private static bool Gathering() =>
+        Plugin.Condition[Dalamud.Game.ClientState.Conditions.ConditionFlag.Gathering]
+        || Plugin.Condition[Dalamud.Game.ClientState.Conditions.ConditionFlag.ExecutingGatheringAction];
 
     internal static bool AutoGatherOn()
     {
