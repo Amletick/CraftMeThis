@@ -588,13 +588,13 @@ public sealed class ScripFarm
     private static bool TurnInRunning() => CollectableManager() is { } m && m.GetType().GetProperty("IsRunning", Any)?.GetValue(m) is true;
 
 
-    private static bool AutoGatherOn()
+    internal static bool AutoGatherOn()
     {
         try { return Plugin.Pi.GetIpcSubscriber<bool>("GatherBuddyReborn.IsAutoGatherEnabled").InvokeFunc(); }
         catch { return false; }
     }
 
-    private static void SetAutoGather(bool on)
+    internal static void SetAutoGather(bool on)
     {
         try { Plugin.Pi.GetIpcSubscriber<bool, object>("GatherBuddyReborn.SetAutoGatherEnabled").InvokeAction(on); }
         catch { /* not running */ }

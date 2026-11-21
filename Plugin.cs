@@ -925,7 +925,8 @@ public sealed class Plugin : IDalamudPlugin
         if (Phase == Phase.ScripFarming) Scrips.Stop();
         ResetBatches();
         if (Phase == Phase.MobFarming) { Hunter.SetAutoHunt(false); Hunter.Restore(); RestoreRsr(); }
-        if (Phase == Phase.Crafting) Vulcan.StopCrafting();
+        if (Phase == Phase.Crafting && gatherOnly) { ScripFarm.SetAutoGather(false); gatherOnly = false; }
+        else if (Phase == Phase.Crafting) Vulcan.StopCrafting();
         afg.Restore();
         RestoreArtisan();
         SetStatus(Phase.Idle, "Остановлено вручную.");
@@ -1004,7 +1005,7 @@ public sealed class Plugin : IDalamudPlugin
     {
         if (!Config.CraftAfterBuying)
         {
-            SetStatus(Phase.Done, "Покупки готовы. Крафт выключен в настройках — запусти его в Vulcan сам.");
+            EnterGatherOnly();
             return;
         }
         craftStarted = false;
@@ -1282,8 +1283,79 @@ public sealed class Plugin : IDalamudPlugin
         SetStatus(Phase.Stopping, "Покупки за биколоры готовы. Жду, пока Auto FATE Grind остановится.");
     }
 
+    // ---------------------------------------------------------------- "Без крафтов": gather the raw materials, no crafting
+
+    private bool gatherOnly;
+    private Dictionary<uint, int> gatherTargets = new();
+    private DateTime gatherCheckAt, gatherProgressAt, gatherOffSince;
+    private int gatherProgress;
+
+    /// <summary>Materials are for someone else to craft: gather what Vulcan would gather during the craft, then stop.</summary>
+    private void EnterGatherOnly()
+    {
+        var plan = Planner.Build(EffectiveCart(), BagCount, id => RouteOf(id) == Route.Bicolor);
+        gatherTargets = plan.Leaves.Where(kv => kv.Value > 0 && RouteOf(kv.Key, kv.Value) == Route.Gather)
+                            .ToDictionary(kv => kv.Key, kv => BagCount(kv.Key) + kv.Value);
+        if (gatherTargets.Count == 0 || !IsLoaded(GatherBuddy)) { FinishGatherOnly(); return; }
+        var err = Vulcan.StartGather(gatherTargets);
+        if (err != null) { Print(err); FinishGatherOnly(); return; }
+        gatherOnly = true;
+        var now = DateTime.UtcNow;
+        phaseStartedAt = gatherCheckAt = gatherProgressAt = now;
+        gatherOffSince = DateTime.MinValue;
+        gatherProgress = gatherTargets.Keys.Sum(BagCount);
+        SetStatus(Phase.Crafting, $"Без крафта: собираю сырьё — {string.Join(", ", gatherTargets.Select(kv => $"{Planner.ItemName(kv.Key)} ×{kv.Value - BagCount(kv.Key)}"))}.");
+    }
+
+    private void TickGatherOnly(DateTime now)
+    {
+        if (now < gatherCheckAt) return;
+        gatherCheckAt = now.AddSeconds(5);
+        var left = gatherTargets.Where(kv => BagCount(kv.Key) < kv.Value).ToList();
+        if (left.Count == 0)
+        {
+            ScripFarm.SetAutoGather(false);
+            FinishGatherOnly();
+            return;
+        }
+        Status = $"Без крафта: авто-сбор — {VulcanLink.AutoGatherStatus()} · осталось {string.Join(", ", left.Select(kv => $"{Planner.ItemName(kv.Key)} {BagCount(kv.Key)}/{kv.Value}"))}";
+        var sum = gatherTargets.Keys.Sum(BagCount);
+        if (sum != gatherProgress) { gatherProgress = sum; gatherProgressAt = now; }
+        // GatherBuddy switched itself off (nothing it can gather left), or no progress for a long time.
+        if (ScripFarm.AutoGatherOn()) gatherOffSince = DateTime.MinValue;
+        else if (gatherOffSince == DateTime.MinValue) gatherOffSince = now;
+        var off = now - phaseStartedAt > TimeSpan.FromSeconds(30) && gatherOffSince != DateTime.MinValue && now - gatherOffSince > TimeSpan.FromSeconds(30);
+        var stalled = now - gatherProgressAt > TimeSpan.FromMinutes(30);
+        if (!off && !stalled) return;
+        Print(off ? "Авто-сбор GatherBuddy выключился, а собрано не всё." : "Авто-сбор 30 минут ничего не добавил — останавливаю.");
+        ScripFarm.SetAutoGather(false);
+        FinishGatherOnly();
+    }
+
+    private void FinishGatherOnly()
+    {
+        gatherOnly = false;
+        // Split by a currency cap: buy (and gather) the next batch with the next round of currency.
+        if (currentBatch != null && remainingLines.Count > 0)
+        {
+            Print($"Партия {BatchNo} добыта (без крафта).");
+            if (StartNextBatch()) RunBatch();
+            return;
+        }
+        ResetBatches();
+        Recalculate();
+        var plan = Planner.Build(FullEffectiveCart(), BagCount, id => RouteOf(id) == Route.Bicolor);
+        var lacking = plan.Leaves.Where(kv => kv.Value > 0).Select(kv => $"{Planner.ItemName(kv.Key)} ×{kv.Value}")
+                          .Concat(plan.Purchases.Where(g => g.Units > 0).Select(g => $"{Planner.ItemName(g.ItemId)} ×{g.Units}"))
+                          .ToList();
+        SetStatus(Phase.Done, lacking.Count == 0
+            ? "Без крафта: всё сырьё на корзину в сумках (кроме кристаллов) — можно отдавать на крафт."
+            : $"Без крафта: добыто, что получилось. Ещё не хватает: {string.Join(", ", lacking)}.");
+    }
+
     private void TickCrafting(DateTime now)
     {
+        if (gatherOnly) { TickGatherOnly(now); return; }
         if (!craftStarted)
         {
             if (VulcanLink.ArtisanLoaded)
@@ -1600,7 +1672,7 @@ public sealed class Plugin : IDalamudPlugin
     private bool StartNextBatch()
     {
         var free = Space.FreeSlots();
-        var budget = Config.SplitBySpace ? free - Config.SpaceReserve : int.MaxValue;
+        var budget = Config.SplitBySpace && Config.CraftAfterBuying ? free - Config.SpaceReserve : int.MaxValue;
         if (budget < 3)
         {
             SetStatus(Phase.Failed, $"В сумке свободно {free} ячеек (запас {Config.SpaceReserve}) — не во что крафтить. Освободи место и запусти снова (докрафт продолжит).");
@@ -1685,7 +1757,7 @@ public sealed class Plugin : IDalamudPlugin
         var slots = Space.Estimate(this, full);
         var (gems, seals, scrips) = CurrencyNeeds(full);
         var reasons = new List<string>();
-        if (Config.SplitBySpace && slots > free - Config.SpaceReserve) reasons.Add($"в сумке свободно {free} ячеек, а нужно ~{slots}");
+        if (Config.SplitBySpace && Config.CraftAfterBuying && slots > free - Config.SpaceReserve) reasons.Add($"в сумке свободно {free} ячеек, а нужно ~{slots}");
         if (gems > Planner.GemCap) reasons.Add($"биколоров нужно {gems}, лимит {Planner.GemCap}");
         var cap = GcSealCap();
         if (seals > cap) reasons.Add($"печатей GC нужно {seals}, лимит {cap}");

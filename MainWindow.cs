@@ -217,6 +217,17 @@ public sealed class MainWindow : Window
         }
 
         ImGui.Spacing();
+        ImGui.BeginDisabled(running);
+        var noCraft = !p.Config.CraftAfterBuying;
+        if (ImGui.Checkbox("Без крафтов", ref noCraft)) { p.Config.CraftAfterBuying = !noCraft; p.SaveConfig(); }
+        if (ImGui.IsItemHovered(ImGuiHoveredFlags.AllowWhenDisabled))
+            ImGui.SetTooltip("Добыть всё сырьё на корзину и не крафтить (например, отдать другу): фарм валют, закупка, мобы и сбор гатераблов. Кристаллы не собираются.");
+        ImGui.SameLine(0, 24);
+        var noSplit = !p.Config.SplitBySpace;
+        if (ImGui.Checkbox("Не разделять корзину", ref noSplit)) { p.Config.SplitBySpace = !noSplit; p.SaveConfig(); }
+        if (ImGui.IsItemHovered(ImGuiHoveredFlags.AllowWhenDisabled))
+            ImGui.SetTooltip("Вся корзина одним прогоном, даже если по оценке не влезает в сумку. На партии всё равно делится, если валюты нужно больше лимита (биколоры 1000, печати GC, скрипы 4000).");
+        ImGui.EndDisabled();
         if (running)
         {
             if (Ui.Primary("Остановить", FontAwesomeIcon.Stop, Ui.Bad)) p.Stop();
@@ -224,7 +235,9 @@ public sealed class MainWindow : Window
         else
         {
             var avail = ImGui.GetContentRegionAvail().X;
-            var label = p.Plan.Gems > p.Gems ? "Нафармить, закупить и скрафтить" : p.VendorBuys.Count > 0 ? "Закупить и скрафтить" : "Скрафтить корзину";
+            var label = !p.Config.CraftAfterBuying
+                ? (p.Plan.Gems > p.Gems ? "Нафармить и добыть сырьё" : "Добыть сырьё без крафта")
+                : p.Plan.Gems > p.Gems ? "Нафармить, закупить и скрафтить" : p.VendorBuys.Count > 0 ? "Закупить и скрафтить" : "Скрафтить корзину";
             if (Ui.Primary(label, FontAwesomeIcon.Play, Ui.Accent, avail - 46)) p.Start();
             ImGui.SameLine();
             ImGui.SetCursorPosY(ImGui.GetCursorPosY() + 3);
